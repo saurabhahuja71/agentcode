@@ -1,0 +1,73 @@
+# Forge configuration
+# Copy to ~/.forge/config.toml or pass with --config
+
+[agent]
+model = "llama3.2"
+temperature = 0.2
+max_tokens = 8192
+max_turns = 50
+full_auto = false
+system_prompt = "You are Forge, a precise and capable coding agent."
+
+# Providers are tried in priority order (lower = first)
+[[providers]]
+name = "ollama"
+kind = "ollama"
+base_url = "http://localhost:11434"
+models = ["llama3.2", "codellama", "qwen2.5-coder"]
+enabled = true
+priority = 10
+
+[[providers]]
+name = "openai"
+kind = "openai_compatible"
+base_url = "https://api.openai.com"
+api_key_env = "OPENAI_API_KEY"
+models = ["gpt-4o", "gpt-4o-mini"]
+enabled = false
+priority = 20
+
+[[providers]]
+name = "groq"
+kind = "openai_compatible"
+base_url = "https://api.groq.com/openai"
+api_key_env = "GROQ_API_KEY"
+models = ["llama-3.3-70b-versatile"]
+enabled = false
+priority = 30
+
+[safety]
+workspace_trust_required = true
+restrict_to_workspace = true
+confirm_destructive = true
+audit_log = true
+allowed_commands = [
+    "ls", "cat", "grep", "rg", "find", "git", "cargo", "npm", "node",
+    "python", "python3", "make", "go", "rustc", "echo", "pwd", "which",
+    "head", "tail", "wc", "diff", "mkdir", "cp", "mv", "touch",
+]
+
+[tools]
+file_tools = true
+shell = true
+git = true
+search = true
+shell_timeout_secs = 120
+
+[session]
+# storage_dir defaults to ~/.forge/sessions
+auto_save = true
+context_window = 128000
+summarize_threshold = 100000
+
+# [[ssh.hosts]]
+# alias = "prod"
+# host = "10.0.0.1"
+# port = 22
+# user = "deploy"
+# identity_file = "~/.ssh/id_ed25519"
+
+# [[mcp.servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"]

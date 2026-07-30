@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/forge",
+    "crates/forge-config",
+    "crates/forge-core",
+    "crates/forge-provider",
+    "crates/forge-tool",
+    "crates/forge-safety",
+    "crates/forge-mcp",
+    "crates/forge-parallel",
+    "crates/forge-ssh",
+    "crates/forge-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Forge Contributors"]
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
+dirs = "5"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+ratatui = "0.29"
+russh = "0.46"
+russh-keys = "0.46"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+walkdir = "2"
+glob = "0.3"
+regex = "1"
+sha2 = "0.10"
+hex = "0.4"
+eventsource-stream = "0.2"
+bytes = "1"
+parking_lot = "0.12"
+
+forge-config = { path = "crates/forge-config" }
+forge-core = { path = "crates/forge-core" }
+forge-provider = { path = "crates/forge-provider" }
+forge-tool = { path = "crates/forge-tool" }
+forge-safety = { path = "crates/forge-safety" }
+forge-mcp = { path = "crates/forge-mcp" }
+forge-parallel = { path = "crates/forge-parallel" }
+forge-ssh = { path = "crates/forge-ssh" }
+forge-tui = { path = "crates/forge-tui" }

@@ -1,0 +1,51 @@
+# Forge + SGLang (local tunnel :30000 on heavyinstance)
+# Use with: forge-sglang  (alias: forge-s)
+# Prereq: sglang-up  OR  sglang-tunnel (if server already running)
+
+[agent]
+model = "qwen2.5-coder-32b-q4_k_m.gguf"
+temperature = 0.2
+max_tokens = 4096
+max_turns = 50
+full_auto = false
+system_prompt = "You are Forge, a precise and capable coding agent. Use tools to read, search, edit, and execute code."
+
+[[providers]]
+name = "sglang"
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:30000"
+api_key = "sglang"
+models = []
+enabled = true
+priority = 1
+
+[[providers]]
+name = "ollama"
+kind = "ollama"
+base_url = "http://127.0.0.1:11434"
+models = ["llama3.2"]
+enabled = false
+priority = 20
+
+[safety]
+workspace_trust_required = true
+restrict_to_workspace = true
+confirm_destructive = true
+audit_log = true
+allowed_commands = [
+    "ls", "cat", "grep", "rg", "find", "git", "cargo", "npm", "node",
+    "python", "python3", "make", "go", "rustc", "echo", "pwd", "which",
+    "head", "tail", "wc", "diff", "mkdir", "cp", "mv", "touch",
+]
+
+[tools]
+file_tools = true
+shell = true
+git = true
+search = true
+shell_timeout_secs = 120
+
+[session]
+auto_save = true
+context_window = 32768
+summarize_threshold = 28000
