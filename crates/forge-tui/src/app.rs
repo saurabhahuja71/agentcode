@@ -13,11 +13,11 @@ use tokio::task::JoinHandle;
 
 pub struct TuiApp {
     pub input: String,
-    pub output_lines: Vec<Line<'static>>,
+    /// Plain-text output log rendered with word wrap.
+    output_text: String,
     pub status: String,
     pub model: String,
     pub session_id: String,
-    pub scroll: u16,
     pub show_help: bool,
 }
 
@@ -30,24 +30,42 @@ impl TuiApp {
     pub fn new(session: &Session) -> Self {
         Self {
             input: String::new(),
-            output_lines: vec![Line::from(Span::styled(
-                "Forge ready. Type a message or /help for commands.",
-                Style::default().fg(Color::DarkGray),
-            ))],
+            output_text: "Forge ready. Type a message or /help for commands.\n".into(),
             status: "idle".into(),
             model: session.model.clone(),
             session_id: session.id.clone(),
-            scroll: 0,
             show_help: false,
         }
     }
 
-    pub fn push_output(&mut self, text: &str, style: Style) {
-        for line in text.lines() {
-            self.output_lines
-                .push(Line::from(Span::styled(line.to_string(), style)));
+    fn ensure_newline(&mut self) {
+        if !self.output_text.is_empty() && !self.output_text.ends_with('\n') {
+            self.output_text.push('\n');
         }
-        self.scroll = self.scroll.saturating_add(text.lines().count() as u16);
+    }
+
+    pub fn push_output(&mut self, text: &str, _style: Style) {
+        if text.is_empty() {
+            return;
+        }
+        self.ensure_newline();
+        self.output_text.push_str(text);
+        if !text.ends_with('\n') {
+            self.output_text.push('\n');
+        }
+    }
+
+    pub fn append_stream(&mut self, text: &str, _style: Style) {
+        if text.is_empty() {
+            return;
+        }
+        self.output_text.push_str(text);
+    }
+
+    pub fn end_stream(&mut self) {
+        if !self.output_text.is_empty() && !self.output_text.ends_with('\n') {
+            self.output_text.push('\n');
+        }
     }
 
     pub fn render(&self, frame: &mut Frame) {
@@ -76,10 +94,11 @@ impl TuiApp {
         ]));
         frame.render_widget(header, chunks[0]);
 
-        let output = Paragraph::new(self.output_lines.clone())
+        let output = Paragraph::new(self.output_text.as_str())
             .block(Block::default().borders(Borders::ALL).title(" Output "))
+            .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll, 0));
+            .scroll((0, 0));
         frame.render_widget(output, chunks[1]);
 
         let input = Paragraph::new(self.input.as_str())
@@ -144,36 +163,42 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
     match event {
         AgentEvent::ContentDelta { text } => {
-            app.push_output(&text, Style::default().fg(Color::White));
+            app.append_stream(&text, Style::default().fg(Color::White));
         }
         AgentEvent::ToolCallStart { name, arguments } => {
+            app.end_stream();
             app.push_output(
-                &format!("\n⚙ {name}({arguments})"),
+                &format!("[tool] {name}({arguments})"),
                 Style::default().fg(Color::Magenta),
             );
         }
         AgentEvent::ToolCallEnd { name, output, is_error } => {
-            let color = if is_error { Color::Red } else { Color::Green };
+            app.end_stream();
             let truncated = if output.len() > 500 {
                 format!("{}...", &output[..500])
             } else {
                 output
             };
+            let label = if is_error { "[error]" } else { "[ok]" };
             app.push_output(
-                &format!("\n✓ {name}: {truncated}"),
-                Style::default().fg(color),
+                &format!("{label} {name}: {truncated}"),
+                Style::default().fg(if is_error { Color::Red } else { Color::Green }),
             );
         }
         AgentEvent::Error { message } => {
+            app.end_stream();
             app.push_output(
-                &format!("\n✗ {message}"),
+                &format!("[error] {message}"),
                 Style::default().fg(Color::Red),
             );
         }
         AgentEvent::TokenUsage { total, .. } => {
             app.status = format!("done ({total} tokens)");
         }
-        AgentEvent::Done => return true,
+        AgentEvent::Done => {
+            app.end_stream();
+            return true;
+        }
         _ => {}
     }
     false
@@ -186,9 +211,7 @@ async fn finish_inflight(
     mut in_flight: InFlight,
 ) {
     while let Ok(event) = in_flight.rx.try_recv() {
-        if apply_agent_event(app, event) {
-            break;
-        }
+        apply_agent_event(app, event);
     }
 
     match in_flight.handle.await {
@@ -210,6 +233,7 @@ async fn finish_inflight(
         }
     }
     app.status = "idle".into();
+    app.end_stream();
 }
 
 pub async fn run_tui(
@@ -238,13 +262,11 @@ pub async fn run_tui(
     loop {
         terminal.draw(|f| app.render(f))?;
 
-        // Drain streaming events without blocking the UI loop
         if let Some(ref mut running) = in_flight {
             let mut done = false;
             while let Ok(event) = running.rx.try_recv() {
                 if apply_agent_event(&mut app, event) {
                     done = true;
-                    break;
                 }
             }
             if done || running.handle.is_finished() {
@@ -284,7 +306,11 @@ pub async fn run_tui(
                             continue;
                         }
 
-                        app.push_output(&format!("> {input}"), Style::default().fg(Color::Cyan));
+                        app.end_stream();
+                        app.ensure_newline();
+                        app.output_text.push_str("> ");
+                        app.output_text.push_str(&input);
+                        app.output_text.push('\n');
                         app.status = "thinking...".into();
 
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -314,7 +340,6 @@ pub async fn run_tui(
                 }
             }
         } else {
-            // Yield so the agent task can run while we poll
             tokio::task::yield_now().await;
         }
     }
@@ -350,7 +375,7 @@ async fn handle_slash_command(
             app.show_help = true;
         }
         SlashCommand::Clear => {
-            app.output_lines.clear();
+            app.output_text.clear();
         }
         SlashCommand::Model(args) => {
             if let Some(model) = args {
@@ -416,12 +441,12 @@ async fn handle_slash_command(
                     Ok(results) => {
                         for task in results {
                             let status = match task.status {
-                                forge_parallel::TaskStatus::Completed => "✓",
-                                forge_parallel::TaskStatus::Failed => "✗",
-                                _ => "·",
+                                forge_parallel::TaskStatus::Completed => "[ok]",
+                                forge_parallel::TaskStatus::Failed => "[fail]",
+                                _ => "[..]",
                             };
                             app.push_output(
-                                &format!("\n{status} {}", task.description),
+                                &format!("{status} {}", task.description),
                                 Style::default().fg(Color::Magenta),
                             );
                             if let Some(result) = task.result {

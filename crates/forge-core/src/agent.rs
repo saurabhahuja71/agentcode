@@ -232,13 +232,17 @@ impl Agent {
                 StreamEvent::Done(resp) => {
                     if content.is_empty() {
                         if let Message::Assistant {
-                            content: c,
+                            content: Some(c),
                             tool_calls: tc,
-                        } = resp.message
+                        } = resp.message.clone()
                         {
+                            if !c.is_empty() {
+                                emit(AgentEvent::ContentDelta { text: c.clone() });
+                                content = c;
+                            }
                             return Ok(forge_provider::ChatResponse {
                                 message: Message::Assistant {
-                                    content: c,
+                                    content: if content.is_empty() { None } else { Some(content) },
                                     tool_calls: tc,
                                 },
                                 finish_reason: resp.finish_reason,
