@@ -8,6 +8,8 @@ use ratatui::{
     Frame,
 };
 use std::io;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::JoinHandle;
 
 pub struct TuiApp {
     pub input: String,
@@ -17,6 +19,11 @@ pub struct TuiApp {
     pub session_id: String,
     pub scroll: u16,
     pub show_help: bool,
+}
+
+struct InFlight {
+    handle: JoinHandle<(Session, Result<()>)>,
+    rx: UnboundedReceiver<AgentEvent>,
 }
 
 impl TuiApp {
@@ -60,7 +67,10 @@ impl TuiApp {
             Span::raw(" | "),
             Span::styled(format!("model: {}", self.model), Style::default().fg(Color::Yellow)),
             Span::raw(" | "),
-            Span::styled(format!("session: {}", &self.session_id[..8.min(self.session_id.len())]), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("session: {}", &self.session_id[..8.min(self.session_id.len())]),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::raw(" | "),
             Span::styled(&self.status, Style::default().fg(Color::Green)),
         ]));
@@ -100,10 +110,7 @@ impl TuiApp {
             "/skills    - List loaded skills",
             "/quit      - Exit",
         ];
-        let items: Vec<ListItem> = help_text
-            .iter()
-            .map(|s| ListItem::new(*s))
-            .collect();
+        let items: Vec<ListItem> = help_text.iter().map(|s| ListItem::new(*s)).collect();
         let help = List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
@@ -134,6 +141,77 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
+    match event {
+        AgentEvent::ContentDelta { text } => {
+            app.push_output(&text, Style::default().fg(Color::White));
+        }
+        AgentEvent::ToolCallStart { name, arguments } => {
+            app.push_output(
+                &format!("\n⚙ {name}({arguments})"),
+                Style::default().fg(Color::Magenta),
+            );
+        }
+        AgentEvent::ToolCallEnd { name, output, is_error } => {
+            let color = if is_error { Color::Red } else { Color::Green };
+            let truncated = if output.len() > 500 {
+                format!("{}...", &output[..500])
+            } else {
+                output
+            };
+            app.push_output(
+                &format!("\n✓ {name}: {truncated}"),
+                Style::default().fg(color),
+            );
+        }
+        AgentEvent::Error { message } => {
+            app.push_output(
+                &format!("\n✗ {message}"),
+                Style::default().fg(Color::Red),
+            );
+        }
+        AgentEvent::TokenUsage { total, .. } => {
+            app.status = format!("done ({total} tokens)");
+        }
+        AgentEvent::Done => return true,
+        _ => {}
+    }
+    false
+}
+
+async fn finish_inflight(
+    app: &mut TuiApp,
+    session: &mut Session,
+    store: &SessionStore,
+    mut in_flight: InFlight,
+) {
+    while let Ok(event) = in_flight.rx.try_recv() {
+        if apply_agent_event(app, event) {
+            break;
+        }
+    }
+
+    match in_flight.handle.await {
+        Ok((updated_session, result)) => {
+            while let Ok(event) = in_flight.rx.try_recv() {
+                apply_agent_event(app, event);
+            }
+            *session = updated_session;
+            if let Err(e) = result {
+                app.push_output(&format!("Error: {e}"), Style::default().fg(Color::Red));
+            }
+            let _ = store.save(session);
+        }
+        Err(e) => {
+            app.push_output(
+                &format!("Agent task failed: {e}"),
+                Style::default().fg(Color::Red),
+            );
+        }
+    }
+    app.status = "idle".into();
+}
+
 pub async fn run_tui(
     agent: std::sync::Arc<Agent>,
     session: &mut Session,
@@ -155,15 +233,36 @@ pub async fn run_tui(
     let mut terminal = ratatui::Terminal::new(backend)?;
 
     let mut app = TuiApp::new(session);
+    let mut in_flight: Option<InFlight> = None;
 
     loop {
         terminal.draw(|f| app.render(f))?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
+        // Drain streaming events without blocking the UI loop
+        if let Some(ref mut running) = in_flight {
+            let mut done = false;
+            while let Ok(event) = running.rx.try_recv() {
+                if apply_agent_event(&mut app, event) {
+                    done = true;
+                    break;
+                }
+            }
+            if done || running.handle.is_finished() {
+                let finished = in_flight.take().expect("in_flight");
+                finish_inflight(&mut app, session, store, finished).await;
+            }
+        }
+
+        if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Enter => {
+                        if in_flight.is_some() {
+                            app.status = "busy — wait for response...".into();
+                            continue;
+                        }
+
                         let input = app.input.trim().to_string();
                         app.input.clear();
                         if input.is_empty() {
@@ -188,7 +287,7 @@ pub async fn run_tui(
                         app.push_output(&format!("> {input}"), Style::default().fg(Color::Cyan));
                         app.status = "thinking...".into();
 
-                        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                         let agent_clone = agent.clone();
                         let user_msg = input.clone();
                         let session_snapshot = session.clone();
@@ -200,59 +299,7 @@ pub async fn run_tui(
                             (s, result)
                         });
 
-                        let mut assistant_buf = String::new();
-                        while let Some(event) = rx.recv().await {
-                            match event {
-                                AgentEvent::ContentDelta { text } => {
-                                    assistant_buf.push_str(&text);
-                                    app.push_output(
-                                        &text,
-                                        Style::default().fg(Color::White),
-                                    );
-                                }
-                                AgentEvent::ToolCallStart { name, arguments } => {
-                                    app.push_output(
-                                        &format!("\n⚙ {name}({arguments})"),
-                                        Style::default().fg(Color::Magenta),
-                                    );
-                                }
-                                AgentEvent::ToolCallEnd { name, output, is_error } => {
-                                    let color = if is_error { Color::Red } else { Color::Green };
-                                    let truncated = if output.len() > 500 {
-                                        format!("{}...", &output[..500])
-                                    } else {
-                                        output
-                                    };
-                                    app.push_output(
-                                        &format!("\n✓ {name}: {truncated}"),
-                                        Style::default().fg(color),
-                                    );
-                                }
-                                AgentEvent::Error { message } => {
-                                    app.push_output(
-                                        &format!("\n✗ {message}"),
-                                        Style::default().fg(Color::Red),
-                                    );
-                                }
-                                AgentEvent::TokenUsage { total, .. } => {
-                                    app.status = format!("done ({total} tokens)");
-                                }
-                                AgentEvent::Done => break,
-                                _ => {}
-                            }
-                        }
-
-                        if let Ok((updated_session, result)) = handle.await {
-                            *session = updated_session;
-                            if let Err(e) = result {
-                                app.push_output(
-                                    &format!("Error: {e}"),
-                                    Style::default().fg(Color::Red),
-                                );
-                            }
-                            let _ = store.save(session);
-                        }
-                        app.status = "idle".into();
+                        in_flight = Some(InFlight { handle, rx });
                     }
                     KeyCode::Char(c) => {
                         app.input.push(c);
@@ -266,7 +313,14 @@ pub async fn run_tui(
                     _ => {}
                 }
             }
+        } else {
+            // Yield so the agent task can run while we poll
+            tokio::task::yield_now().await;
         }
+    }
+
+    if let Some(running) = in_flight.take() {
+        finish_inflight(&mut app, session, store, running).await;
     }
 
     disable_raw_mode()?;
@@ -302,7 +356,10 @@ async fn handle_slash_command(
             if let Some(model) = args {
                 session.model = model.clone();
                 app.model = model.clone();
-                app.push_output(&format!("Model set to {model}"), Style::default().fg(Color::Yellow));
+                app.push_output(
+                    &format!("Model set to {model}"),
+                    Style::default().fg(Color::Yellow),
+                );
             } else {
                 app.push_output(
                     &format!("Current model: {}", app.model),

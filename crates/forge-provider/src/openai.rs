@@ -223,7 +223,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
                         Ok(chunk) => {
                             if let Some(choice) = chunk.choices.into_iter().next() {
                                 if let Some(content) = choice.delta.content {
-                                    return StreamEvent::ContentDelta(content);
+                                    if !content.is_empty() {
+                                        return StreamEvent::ContentDelta(content);
+                                    }
                                 }
                                 if let Some(tool_calls) = choice.delta.tool_calls {
                                     for tc in tool_calls {
@@ -243,6 +245,23 @@ impl LlmProvider for OpenAiCompatibleProvider {
                                             arguments_delta: args,
                                         };
                                     }
+                                }
+                                if choice.finish_reason.is_some() {
+                                    return StreamEvent::Done(ChatResponse {
+                                        message: Message::Assistant {
+                                            content: None,
+                                            tool_calls: None,
+                                        },
+                                        finish_reason: choice.finish_reason,
+                                        usage: chunk
+                                            .usage
+                                            .map(|u| TokenUsage {
+                                                prompt_tokens: u.prompt_tokens,
+                                                completion_tokens: u.completion_tokens,
+                                                total_tokens: u.total_tokens,
+                                            })
+                                            .unwrap_or_default(),
+                                    });
                                 }
                             }
                             StreamEvent::ContentDelta(String::new())

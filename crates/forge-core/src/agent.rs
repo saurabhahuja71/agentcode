@@ -141,7 +141,6 @@ impl Agent {
                 Some(c) if !c.is_empty() => c,
                 _ => {
                     emit(AgentEvent::TurnEnd { turn });
-                    emit(AgentEvent::Done);
                     break;
                 }
             };
@@ -177,6 +176,7 @@ impl Agent {
         }
 
         session.touch();
+        emit(AgentEvent::Done);
         Ok(())
     }
 
