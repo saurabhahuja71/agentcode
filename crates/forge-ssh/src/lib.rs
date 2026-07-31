@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
+pub mod tools;
+pub use tools::{register_ssh_tools, RemoteExecTool, RemoteListDirTool, RemoteReadFileTool};
+
 #[derive(Debug, Error)]
 pub enum SshError {
     #[error("connection failed: {0}")]

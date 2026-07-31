@@ -192,11 +192,18 @@ forge init                     # Create ~/.forge/config.toml
 | `list_dir` | List directory (optional recursive) |
 | `grep` | Regex search across files |
 | `glob` | Find files by glob pattern |
+| `project_index` | Build project structure + symbol index |
+| `search_codebase` | Relevance search across indexed project |
 | `shell` | Execute sandboxed shell commands |
 | `git_status` | Git working tree status |
 | `git_diff` | Git diff (optional path, staged) |
+| `git_log` | Recent commit history |
+| `git_commit` | Stage all and commit with message |
 | `code_outline` | Extract functions/structs/classes from source files |
 | `read_skill` | Load a skill workflow by name |
+| `remote_exec` | Run command on SSH host (when configured) |
+| `remote_read_file` | Read file from SSH host |
+| `remote_list_dir` | List directory on SSH host |
 
 ## MCP integration
 
@@ -267,15 +274,15 @@ Key sections:
 - `[[ssh.hosts]]` — remote machine definitions
 - `[[mcp.servers]]` — MCP server stubs (extensibility hook)
 
-## Extensibility roadmap
-
-The architecture supports these extension points (stubs in place):
+## Extensibility
 
 - **Skills/plugins:** Load from `skills/` or `~/.forge/skills/` — each directory with a `SKILL.md` file
-- **MCP client:** `[[mcp.servers]]` config section
-- **Hooks:** Pre/post tool lifecycle (forge-core extension point)
-- **tree-sitter:** Code intelligence layer (planned in forge-tool)
-- **Worktree isolation:** Parallel agents in git worktrees (forge-parallel)
+- **MCP client:** `[[mcp.servers]]` config section — tools auto-registered as `mcp_<server>_<tool>`
+- **Hooks:** Pre/post tool and turn lifecycle via `HookRegistry` (see `docs/ARCHITECTURE.md`)
+- **tree-sitter:** Code intelligence layer upgrade (planned)
+- **Worktree isolation:** Parallel agents in git worktrees (`forge-parallel`)
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full implementation status and roadmap.
 
 ## Development
 

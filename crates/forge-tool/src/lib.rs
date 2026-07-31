@@ -43,11 +43,14 @@ pub trait Tool: Send + Sync {
 
 pub mod file;
 pub mod git;
+pub mod index;
 pub mod outline;
 pub mod registry;
 pub mod search;
 pub mod shell;
 pub mod skills;
+
+pub use index::{new_index_tools, ProjectIndexTool, SearchCodebaseTool};
 
 pub use registry::ToolRegistry;
 pub use skills::{Skill, SkillLoader};

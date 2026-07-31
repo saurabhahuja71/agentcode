@@ -1,4 +1,5 @@
 use crate::events::AgentEvent;
+use crate::hooks::{HookContext, HookPhase, HookRegistry};
 use crate::session::Session;
 use crate::summarize::{estimate_tokens, summarize_messages};
 use anyhow::Result;
@@ -8,6 +9,7 @@ use forge_provider::{
 };
 use forge_tool::ToolRegistry;
 use futures::StreamExt;
+use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -40,7 +42,8 @@ impl From<&ForgeConfig> for RuntimeAgentConfig {
 pub struct Agent {
     provider: Arc<dyn LlmProvider>,
     tools: Arc<ToolRegistry>,
-    config: RuntimeAgentConfig,
+    config: RwLock<RuntimeAgentConfig>,
+    hooks: Arc<HookRegistry>,
 }
 
 impl Agent {
@@ -52,7 +55,8 @@ impl Agent {
         Self {
             provider,
             tools,
-            config,
+            config: RwLock::new(config),
+            hooks: Arc::new(HookRegistry::new()),
         }
     }
 
@@ -61,12 +65,16 @@ impl Agent {
         Self::new(provider, tools, RuntimeAgentConfig::from(config))
     }
 
-    pub fn set_model(&mut self, model: String) {
-        self.config.model = model;
+    pub fn hooks(&self) -> Arc<HookRegistry> {
+        self.hooks.clone()
     }
 
-    pub fn model(&self) -> &str {
-        &self.config.model
+    pub fn set_model(&self, model: String) {
+        self.config.write().model = model;
+    }
+
+    pub fn model(&self) -> String {
+        self.config.read().model.clone()
     }
 
     pub fn tool_names(&self) -> Vec<String> {
@@ -85,9 +93,11 @@ impl Agent {
             }
         };
 
+        let cfg = self.config.read().clone();
+
         if session.messages.is_empty() {
             session.messages.push(Message::System {
-                content: self.config.system_prompt.clone(),
+                content: cfg.system_prompt.clone(),
             });
         }
 
@@ -96,23 +106,31 @@ impl Agent {
         });
         session.set_title_from_message(&user_message);
 
-        if estimate_tokens(&session.messages) > self.config.summarize_threshold {
+        if estimate_tokens(&session.messages) > cfg.summarize_threshold {
             session.messages = summarize_messages(&session.messages, 20);
         }
 
-        for turn in 0..self.config.max_turns {
+        for turn in 0..cfg.max_turns {
             emit(AgentEvent::TurnStart { turn });
+            self.hooks.emit(&HookContext {
+                phase: HookPhase::TurnStart,
+                tool_name: None,
+                arguments: None,
+                output: None,
+                is_error: None,
+                turn: Some(turn),
+            });
 
             let request = ChatRequest {
-                model: self.config.model.clone(),
+                model: cfg.model.clone(),
                 messages: session.messages.clone(),
                 tools: self.tools.definitions(),
-                temperature: self.config.temperature,
-                max_tokens: self.config.max_tokens,
-                stream: self.config.stream,
+                temperature: cfg.temperature,
+                max_tokens: cfg.max_tokens,
+                stream: cfg.stream,
             };
 
-            let response = if self.config.stream {
+            let response = if cfg.stream {
                 self.run_streaming(&request, &emit).await?
             } else {
                 self.provider.chat(request).await.map_err(|e| anyhow::anyhow!(e))?
@@ -145,39 +163,88 @@ impl Agent {
                 }
             };
 
-            for call in calls {
-                let name = call.function.name.clone();
-                let args_str = call.function.arguments.clone();
-                emit(AgentEvent::ToolCallStart {
-                    name: name.clone(),
-                    arguments: args_str.clone(),
-                });
-
-                let args: Value = serde_json::from_str(&args_str).unwrap_or(Value::Null);
-                let result = self.tools.execute(&name, args).await;
-                let (output, is_error) = match result {
-                    Ok(r) => (r.output, r.is_error),
-                    Err(e) => (e.to_string(), true),
-                };
-
-                emit(AgentEvent::ToolCallEnd {
-                    name: name.clone(),
-                    output: output.clone(),
-                    is_error,
-                });
-
+            let tool_results = self.execute_tools_concurrent(&calls, &emit).await;
+            for (call_id, output) in tool_results {
                 session.messages.push(Message::Tool {
-                    tool_call_id: call.id,
+                    tool_call_id: call_id,
                     content: output,
                 });
             }
 
             emit(AgentEvent::TurnEnd { turn });
+            self.hooks.emit(&HookContext {
+                phase: HookPhase::TurnEnd,
+                tool_name: None,
+                arguments: None,
+                output: None,
+                is_error: None,
+                turn: Some(turn),
+            });
         }
 
         session.touch();
         emit(AgentEvent::Done);
         Ok(())
+    }
+
+    async fn execute_tools_concurrent(
+        &self,
+        calls: &[ToolCall],
+        emit: &impl Fn(AgentEvent),
+    ) -> Vec<(String, String)> {
+        let mut handles = Vec::with_capacity(calls.len());
+
+        for call in calls {
+            let name = call.function.name.clone();
+            let args_str = call.function.arguments.clone();
+            let call_id = call.id.clone();
+            emit(AgentEvent::ToolCallStart {
+                name: name.clone(),
+                arguments: args_str.clone(),
+            });
+
+            let args: Value = serde_json::from_str(&args_str).unwrap_or(Value::Null);
+            self.hooks
+                .emit(&HookContext::pre_tool(&name, args.clone()));
+
+            let tools = self.tools.clone();
+            let hooks = self.hooks.clone();
+            let name_for_task = name.clone();
+
+            handles.push(tokio::spawn(async move {
+                let result = tools.execute(&name_for_task, args).await;
+                let (output, is_error) = match result {
+                    Ok(r) => (r.output, r.is_error),
+                    Err(e) => (e.to_string(), true),
+                };
+                hooks.emit(&HookContext::post_tool(
+                    &name_for_task,
+                    output.clone(),
+                    is_error,
+                ));
+                (call_id, name_for_task, output, is_error)
+            }));
+        }
+
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.await {
+                Ok((call_id, name, output, is_error)) => {
+                    emit(AgentEvent::ToolCallEnd {
+                        name,
+                        output: output.clone(),
+                        is_error,
+                    });
+                    results.push((call_id, output));
+                }
+                Err(e) => {
+                    emit(AgentEvent::Error {
+                        message: format!("tool task panicked: {e}"),
+                    });
+                }
+            }
+        }
+        results
     }
 
     async fn run_streaming(

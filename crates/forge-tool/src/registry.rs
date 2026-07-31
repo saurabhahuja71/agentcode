@@ -59,6 +59,10 @@ impl ToolRegistry {
                 sandbox.clone(),
                 audit.clone(),
             )));
+            let (index_tool, search_tool) =
+                super::index::new_index_tools(sandbox.clone(), audit.clone());
+            registry.register(Arc::new(index_tool));
+            registry.register(Arc::new(search_tool));
         }
 
         if config.shell {
@@ -75,6 +79,14 @@ impl ToolRegistry {
                 audit.clone(),
             )));
             registry.register(Arc::new(super::git::GitDiffTool::new(
+                sandbox.clone(),
+                audit.clone(),
+            )));
+            registry.register(Arc::new(super::git::GitLogTool::new(
+                sandbox.clone(),
+                audit.clone(),
+            )));
+            registry.register(Arc::new(super::git::GitCommitTool::new(
                 sandbox.clone(),
                 audit.clone(),
             )));

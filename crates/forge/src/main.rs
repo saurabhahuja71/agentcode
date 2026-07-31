@@ -7,7 +7,7 @@ use forge_core::{Agent, Session, SessionStore};
 use forge_mcp::register_mcp_tools;
 use forge_parallel::ParallelExecutor;
 use forge_safety::{AuditLogger, Sandbox, WorkspaceTrust};
-use forge_ssh::SshManager;
+use forge_ssh::{register_ssh_tools, SshManager};
 use forge_tool::{SkillLoader, ToolRegistry};
 use forge_tui::run_tui;
 use std::path::PathBuf;
@@ -154,16 +154,21 @@ async fn main() -> Result<()> {
         }
     });
     let skill_loader = Arc::new(SkillLoader::load(skills_dir.as_deref()));
+    let ssh_manager = Arc::new(SshManager::new(config.ssh.hosts.clone()));
 
     let mut tool_registry = ToolRegistry::new(
         sandbox,
-        audit,
+        audit.clone(),
         &config.tools,
         Some(skill_loader.clone()),
     );
     let mcp_tools = register_mcp_tools(&mut tool_registry, &config.mcp).await?;
     if !mcp_tools.is_empty() {
         tracing::info!(count = mcp_tools.len(), "registered MCP tools");
+    }
+    if !config.ssh.hosts.is_empty() {
+        register_ssh_tools(&mut tool_registry, ssh_manager.clone());
+        tracing::info!(count = config.ssh.hosts.len(), "registered SSH remote tools");
     }
     let tools = Arc::new(tool_registry);
 
@@ -174,18 +179,29 @@ async fn main() -> Result<()> {
             format!("{}\n\n{}", forge_config.agent.system_prompt, skills_ctx);
     }
 
-    let mut agent = Agent::from_forge_config(&forge_config, tools);
+    let agent = Agent::from_forge_config(&forge_config, tools);
     if let Some(model) = &cli.model {
         agent.set_model(model.clone());
     }
 
+    // Audit hook: log all tool invocations
+    let audit_for_hooks = audit.clone();
+    agent.hooks().register(move |ctx| {
+        use forge_core::HookPhase;
+        if ctx.phase == HookPhase::PostTool {
+            if let (Some(name), Some(output)) = (&ctx.tool_name, &ctx.output) {
+                let ok = !ctx.is_error.unwrap_or(false);
+                audit_for_hooks.log(name, "hook", serde_json::json!({ "output_len": output.len() }), ok);
+            }
+        }
+    });
+
     let agent = Arc::new(agent);
     let store = SessionStore::new(config.session.storage_dir.clone())?;
-    let ssh_manager = Arc::new(SshManager::new(config.ssh.hosts.clone()));
 
     match cli.command {
         None => {
-            let mut session = Session::new(workspace.clone(), agent.model().to_string());
+            let mut session = Session::new(workspace.clone(), agent.model());
             run_tui(
                 agent.clone(),
                 &mut session,
@@ -213,7 +229,7 @@ async fn main() -> Result<()> {
             .await?;
         }
         Some(Commands::Exec { prompt, format }) => {
-            let mut session = Session::new(workspace, agent.model().to_string());
+            let mut session = Session::new(workspace, agent.model());
             agent.run_turn(&mut session, prompt, None).await?;
             if config.session.auto_save {
                 store.save(&session)?;
@@ -229,7 +245,7 @@ async fn main() -> Result<()> {
             let executor = ParallelExecutor::new(
                 agent.clone(),
                 workspace,
-                agent.model().to_string(),
+                agent.model(),
             );
             let results = executor.run_parallel(task_list).await?;
             for task in results {

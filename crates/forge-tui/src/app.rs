@@ -379,6 +379,7 @@ async fn handle_slash_command(
         }
         SlashCommand::Model(args) => {
             if let Some(model) = args {
+                agent.set_model(model.clone());
                 session.model = model.clone();
                 app.model = model.clone();
                 app.push_output(
@@ -435,7 +436,7 @@ async fn handle_slash_command(
                 let executor = forge_parallel::ParallelExecutor::new(
                     agent.clone(),
                     workspace,
-                    agent.model().to_string(),
+                    agent.model(),
                 );
                 match executor.run_parallel(tasks).await {
                     Ok(results) => {
