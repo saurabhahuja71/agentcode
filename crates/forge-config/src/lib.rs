@@ -66,7 +66,7 @@ pub enum ProviderKind {
 pub struct SafetyConfig {
     #[serde(default = "default_true")]
     pub workspace_trust_required: bool,
-    #[serde(default)]
+    #[serde(default = "default_allowed_commands")]
     pub allowed_commands: Vec<String>,
     #[serde(default = "default_true")]
     pub restrict_to_workspace: bool,
@@ -100,6 +100,9 @@ pub struct SshConfig {
     pub hosts: Vec<SshHostConfig>,
     #[serde(default)]
     pub known_hosts_path: Option<PathBuf>,
+    /// Commands permitted via remote_exec on SSH hosts.
+    #[serde(default = "default_allowed_commands")]
+    pub allowed_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +189,110 @@ fn default_system_prompt() -> String {
         .into()
 }
 
+/// Default shell commands allowed locally (shell tool) and remotely (remote_exec).
+pub fn default_allowed_commands() -> Vec<String> {
+    vec![
+        // file & text
+        "ls".into(),
+        "cat".into(),
+        "grep".into(),
+        "rg".into(),
+        "find".into(),
+        "head".into(),
+        "tail".into(),
+        "wc".into(),
+        "diff".into(),
+        "less".into(),
+        "more".into(),
+        "sed".into(),
+        "awk".into(),
+        "sort".into(),
+        "cut".into(),
+        "tr".into(),
+        "tee".into(),
+        "xargs".into(),
+        // filesystem
+        "mkdir".into(),
+        "cp".into(),
+        "mv".into(),
+        "touch".into(),
+        "ln".into(),
+        "rm".into(),
+        "chmod".into(),
+        "chown".into(),
+        "readlink".into(),
+        "realpath".into(),
+        "stat".into(),
+        "du".into(),
+        "df".into(),
+        // archives
+        "tar".into(),
+        "gzip".into(),
+        "gunzip".into(),
+        "zip".into(),
+        "unzip".into(),
+        // dev & build
+        "git".into(),
+        "cargo".into(),
+        "npm".into(),
+        "node".into(),
+        "python".into(),
+        "python3".into(),
+        "make".into(),
+        "go".into(),
+        "rustc".into(),
+        // shell & meta
+        "echo".into(),
+        "pwd".into(),
+        "which".into(),
+        "env".into(),
+        "bash".into(),
+        "sh".into(),
+        "true".into(),
+        "false".into(),
+        "test".into(),
+        // network
+        "curl".into(),
+        "wget".into(),
+        "ping".into(),
+        "nc".into(),
+        "netstat".into(),
+        "ss".into(),
+        "dig".into(),
+        "nslookup".into(),
+        // containers & orchestration
+        "podman".into(),
+        "docker".into(),
+        "docker-compose".into(),
+        "kubectl".into(),
+        "helm".into(),
+        // systemd & services
+        "systemctl".into(),
+        "journalctl".into(),
+        "service".into(),
+        // remote access
+        "ssh".into(),
+        "scp".into(),
+        "rsync".into(),
+        // processes
+        "ps".into(),
+        "top".into(),
+        "htop".into(),
+        "kill".into(),
+        "killall".into(),
+        "pgrep".into(),
+        "pkill".into(),
+        "nohup".into(),
+        // system info
+        "date".into(),
+        "uname".into(),
+        "hostname".into(),
+        "id".into(),
+        "whoami".into(),
+        "sudo".into(),
+    ]
+}
+
 impl Default for ForgeConfig {
     fn default() -> Self {
         Self {
@@ -226,33 +333,7 @@ impl Default for SafetyConfig {
     fn default() -> Self {
         Self {
             workspace_trust_required: true,
-            allowed_commands: vec![
-                "ls".into(),
-                "cat".into(),
-                "grep".into(),
-                "rg".into(),
-                "find".into(),
-                "git".into(),
-                "cargo".into(),
-                "npm".into(),
-                "node".into(),
-                "python".into(),
-                "python3".into(),
-                "make".into(),
-                "go".into(),
-                "rustc".into(),
-                "echo".into(),
-                "pwd".into(),
-                "which".into(),
-                "head".into(),
-                "tail".into(),
-                "wc".into(),
-                "diff".into(),
-                "mkdir".into(),
-                "cp".into(),
-                "mv".into(),
-                "touch".into(),
-            ],
+            allowed_commands: default_allowed_commands(),
             restrict_to_workspace: true,
             confirm_destructive: true,
             audit_log: true,
@@ -276,7 +357,11 @@ impl Default for ToolsConfig {
 
 impl Default for SshConfig {
     fn default() -> Self {
-        Self { hosts: vec![], known_hosts_path: None }
+        Self {
+            hosts: vec![],
+            known_hosts_path: None,
+            allowed_commands: default_allowed_commands(),
+        }
     }
 }
 

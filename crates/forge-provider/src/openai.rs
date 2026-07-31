@@ -206,73 +206,91 @@ impl LlmProvider for OpenAiCompatibleProvider {
         }
 
         let stream = resp.bytes_stream().eventsource();
-        let mapped = stream.map(|event| {
-            match event {
-                Ok(ev) => {
-                    if ev.data == "[DONE]" {
-                        return StreamEvent::Done(ChatResponse {
+        // flat_map so a single SSE chunk can yield content *and* Done when the
+        // provider packs finish_reason into the last content delta (common with
+        // SGLang / some OpenAI-compatible servers). Returning only ContentDelta
+        // previously left the HTTP body open until the 300s client timeout —
+        // the TUI stayed "busy" after the first answer.
+        let mapped = stream.flat_map(|event| {
+            futures::stream::iter(parse_sse_event(event))
+        });
+
+        Ok(Box::pin(mapped))
+    }
+}
+
+fn parse_sse_event(
+    event: Result<eventsource_stream::Event, eventsource_stream::EventStreamError<reqwest::Error>>,
+) -> Vec<StreamEvent> {
+    match event {
+        Ok(ev) => {
+            if ev.data == "[DONE]" {
+                return vec![StreamEvent::Done(ChatResponse {
+                    message: Message::Assistant {
+                        content: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                    usage: TokenUsage::default(),
+                })];
+            }
+            match serde_json::from_str::<StreamChunk>(&ev.data) {
+                Ok(chunk) => {
+                    let usage = chunk.usage.map(|u| TokenUsage {
+                        prompt_tokens: u.prompt_tokens,
+                        completion_tokens: u.completion_tokens,
+                        total_tokens: u.total_tokens,
+                    });
+                    let mut out = Vec::new();
+                    if let Some(choice) = chunk.choices.into_iter().next() {
+                        if let Some(content) = choice.delta.content {
+                            if !content.is_empty() {
+                                out.push(StreamEvent::ContentDelta(content));
+                            }
+                        }
+                        if let Some(tool_calls) = choice.delta.tool_calls {
+                            for tc in tool_calls {
+                                let args = tc
+                                    .function
+                                    .as_ref()
+                                    .and_then(|f| f.arguments.clone())
+                                    .unwrap_or_default();
+                                let name = tc.function.as_ref().and_then(|f| f.name.clone());
+                                out.push(StreamEvent::ToolCallDelta {
+                                    index: tc.index,
+                                    id: tc.id,
+                                    name,
+                                    arguments_delta: args,
+                                });
+                            }
+                        }
+                        if choice.finish_reason.is_some() {
+                            out.push(StreamEvent::Done(ChatResponse {
+                                message: Message::Assistant {
+                                    content: None,
+                                    tool_calls: None,
+                                },
+                                finish_reason: choice.finish_reason,
+                                usage: usage.unwrap_or_default(),
+                            }));
+                        }
+                    } else if let Some(usage) = usage {
+                        // Usage-only final chunk with empty choices — treat as Done
+                        // so the consumer unblocks even without finish_reason/[DONE].
+                        out.push(StreamEvent::Done(ChatResponse {
                             message: Message::Assistant {
                                 content: None,
                                 tool_calls: None,
                             },
                             finish_reason: Some("stop".into()),
-                            usage: TokenUsage::default(),
-                        });
+                            usage,
+                        }));
                     }
-                    match serde_json::from_str::<StreamChunk>(&ev.data) {
-                        Ok(chunk) => {
-                            if let Some(choice) = chunk.choices.into_iter().next() {
-                                if let Some(content) = choice.delta.content {
-                                    if !content.is_empty() {
-                                        return StreamEvent::ContentDelta(content);
-                                    }
-                                }
-                                if let Some(tool_calls) = choice.delta.tool_calls {
-                                    for tc in tool_calls {
-                                        let args = tc
-                                            .function
-                                            .as_ref()
-                                            .and_then(|f| f.arguments.clone())
-                                            .unwrap_or_default();
-                                        let name = tc
-                                            .function
-                                            .as_ref()
-                                            .and_then(|f| f.name.clone());
-                                        return StreamEvent::ToolCallDelta {
-                                            index: tc.index,
-                                            id: tc.id,
-                                            name,
-                                            arguments_delta: args,
-                                        };
-                                    }
-                                }
-                                if choice.finish_reason.is_some() {
-                                    return StreamEvent::Done(ChatResponse {
-                                        message: Message::Assistant {
-                                            content: None,
-                                            tool_calls: None,
-                                        },
-                                        finish_reason: choice.finish_reason,
-                                        usage: chunk
-                                            .usage
-                                            .map(|u| TokenUsage {
-                                                prompt_tokens: u.prompt_tokens,
-                                                completion_tokens: u.completion_tokens,
-                                                total_tokens: u.total_tokens,
-                                            })
-                                            .unwrap_or_default(),
-                                    });
-                                }
-                            }
-                            StreamEvent::ContentDelta(String::new())
-                        }
-                        Err(e) => StreamEvent::Error(e.to_string()),
-                    }
+                    out
                 }
-                Err(e) => StreamEvent::Error(e.to_string()),
+                Err(e) => vec![StreamEvent::Error(e.to_string())],
             }
-        });
-
-        Ok(Box::pin(mapped))
+        }
+        Err(e) => vec![StreamEvent::Error(e.to_string())],
     }
 }

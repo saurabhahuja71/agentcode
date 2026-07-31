@@ -111,11 +111,12 @@ enum DebugAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("forge=info".parse()?))
-        .init();
-
+    // Parse CLI first so TUI mode can avoid writing logs to the terminal.
+    // stderr logging during the alternate screen corrupts ratatui's diff buffer
+    // (ghost text like "INFO forge::..." stuck in the input area).
     let cli = Cli::parse();
+    init_tracing(uses_tui(&cli))?;
+
     let config = ForgeConfig::load_or_default(cli.config.as_deref())?;
 
     if let Some(Commands::Init) = &cli.command {
@@ -167,7 +168,11 @@ async fn main() -> Result<()> {
         tracing::info!(count = mcp_tools.len(), "registered MCP tools");
     }
     if !config.ssh.hosts.is_empty() {
-        register_ssh_tools(&mut tool_registry, ssh_manager.clone());
+        register_ssh_tools(
+            &mut tool_registry,
+            ssh_manager.clone(),
+            config.ssh.allowed_commands.clone(),
+        );
         tracing::info!(count = config.ssh.hosts.len(), "registered SSH remote tools");
     }
     let tools = Arc::new(tool_registry);
@@ -310,6 +315,36 @@ async fn main() -> Result<()> {
         Some(Commands::Init) => unreachable!(),
     }
 
+    Ok(())
+}
+
+/// Interactive chat owns the terminal; all other subcommands print to stdout/stderr.
+fn uses_tui(cli: &Cli) -> bool {
+    matches!(cli.command, None | Some(Commands::Chat { .. }))
+}
+
+fn init_tracing(tui: bool) -> Result<()> {
+    let filter = EnvFilter::from_default_env().add_directive("forge=info".parse()?);
+    if tui {
+        let dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".forge");
+        std::fs::create_dir_all(&dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("forge.log"))?;
+        fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init();
+    } else {
+        fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    }
     Ok(())
 }
 

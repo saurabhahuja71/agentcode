@@ -5,12 +5,14 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+arboard.workspace = true
 crossterm.workspace = true
 forge-config = { workspace = true }
 forge-core = { workspace = true }
 forge-parallel = { workspace = true }
 forge-ssh = { workspace = true }
 forge-tool = { workspace = true }
+futures.workspace = true
 ratatui.workspace = true
 serde.workspace = true
 tokio.workspace = true

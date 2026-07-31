@@ -1,11 +1,13 @@
 use crate::SshManager;
 use async_trait::async_trait;
+use forge_safety::validate_allowed_command;
 use forge_tool::{Tool, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 pub struct RemoteExecTool {
     manager: Arc<SshManager>,
+    allowed_commands: Vec<String>,
 }
 
 pub struct RemoteReadFileTool {
@@ -17,8 +19,11 @@ pub struct RemoteListDirTool {
 }
 
 impl RemoteExecTool {
-    pub fn new(manager: Arc<SshManager>) -> Self {
-        Self { manager }
+    pub fn new(manager: Arc<SshManager>, allowed_commands: Vec<String>) -> Self {
+        Self {
+            manager,
+            allowed_commands,
+        }
     }
 }
 
@@ -62,6 +67,8 @@ impl Tool for RemoteExecTool {
         let command = arguments["command"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("command required".into()))?;
+
+        validate_allowed_command(command, &self.allowed_commands)?;
 
         match self.manager.exec(alias, command).await {
             Ok(output) => Ok(ToolResult {
@@ -159,8 +166,15 @@ impl Tool for RemoteListDirTool {
     }
 }
 
-pub fn register_ssh_tools(registry: &mut forge_tool::ToolRegistry, manager: Arc<SshManager>) {
-    registry.register(Arc::new(RemoteExecTool::new(manager.clone())));
+pub fn register_ssh_tools(
+    registry: &mut forge_tool::ToolRegistry,
+    manager: Arc<SshManager>,
+    allowed_commands: Vec<String>,
+) {
+    registry.register(Arc::new(RemoteExecTool::new(
+        manager.clone(),
+        allowed_commands,
+    )));
     registry.register(Arc::new(RemoteReadFileTool::new(manager.clone())));
     registry.register(Arc::new(RemoteListDirTool::new(manager)));
 }

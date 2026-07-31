@@ -63,6 +63,7 @@ impl TuiApp {
         if !text.ends_with('\n') {
             self.output_text.push('\n');
         }
+        self.trim_output_if_needed();
     }
 
     pub fn append_stream(&mut self, text: &str, _style: Style) {
@@ -70,6 +71,23 @@ impl TuiApp {
             return;
         }
         self.output_text.push_str(text);
+        self.trim_output_if_needed();
+    }
+
+    /// Keep the output buffer bounded so wrap/scroll stays correct and fast
+    /// for long interactive sessions.
+    fn trim_output_if_needed(&mut self) {
+        const MAX_OUTPUT_CHARS: usize = 200_000;
+        if self.output_text.len() <= MAX_OUTPUT_CHARS {
+            return;
+        }
+        let excess = self.output_text.len() - MAX_OUTPUT_CHARS;
+        // Drop whole lines when possible so we don't start mid-glyph/line.
+        let cut = self.output_text[excess..]
+            .find('\n')
+            .map(|i| excess + i + 1)
+            .unwrap_or(excess);
+        self.output_text = self.output_text[cut..].to_string();
     }
 
     pub fn end_stream(&mut self) {
@@ -78,11 +96,58 @@ impl TuiApp {
         }
     }
 
+    fn paste_into_input(&mut self, text: &str) {
+        for ch in text.chars() {
+            if ch == '\n' || ch == '\r' {
+                break;
+            }
+            self.input.push(ch);
+        }
+    }
+
+    fn copy_output(&mut self) -> bool {
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(self.output_text.clone())) {
+            Ok(()) => {
+                self.status = "copied output".into();
+                true
+            }
+            Err(_) => {
+                self.status = "clipboard unavailable".into();
+                false
+            }
+        }
+    }
+
+    fn paste_from_clipboard(&mut self) -> bool {
+        match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+            Ok(text) => {
+                self.paste_into_input(&text);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     fn current_model_index(&self) -> usize {
         self.available_models
             .iter()
             .position(|m| m == &self.model)
             .unwrap_or(self.model_picker_index)
+    }
+
+    /// Scroll offset so the newest output stays visible (accounting for borders + wrap).
+    fn output_scroll_y(&self, area_width: u16, area_height: u16) -> u16 {
+        let inner_width = area_width.saturating_sub(2);
+        let inner_height = area_height.saturating_sub(2);
+        if inner_width == 0 || inner_height == 0 {
+            return 0;
+        }
+        // line_count is usize; ratatui scroll is u16 — clamp to avoid wrap on long sessions.
+        let total_lines = Paragraph::new(self.output_text.as_str())
+            .wrap(Wrap { trim: false })
+            .line_count(inner_width)
+            .min(u16::MAX as usize) as u16;
+        total_lines.saturating_sub(inner_height)
     }
 
     pub fn open_model_picker(&mut self) {
@@ -137,20 +202,33 @@ impl TuiApp {
         ]));
         frame.render_widget(header, chunks[0]);
 
+        let scroll_y = self.output_scroll_y(chunks[1].width, chunks[1].height);
         let output = Paragraph::new(self.output_text.as_str())
             .block(Block::default().borders(Borders::ALL).title(" Output "))
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false })
-            .scroll((0, 0));
+            .scroll((scroll_y, 0));
         frame.render_widget(output, chunks[1]);
 
+        // Horizontal scroll so long input stays usable; empty input always shows blank.
+        let input_inner_w = chunks[2].width.saturating_sub(2) as usize;
+        let input_scroll_x = if input_inner_w == 0 {
+            0u16
+        } else {
+            self.input
+                .chars()
+                .count()
+                .saturating_sub(input_inner_w.saturating_sub(1))
+                .min(u16::MAX as usize) as u16
+        };
         let input = Paragraph::new(self.input.as_str())
             .block(Block::default().borders(Borders::ALL).title(" Input "))
-            .style(Style::default().fg(Color::White));
+            .style(Style::default().fg(Color::White))
+            .scroll((0, input_scroll_x));
         frame.render_widget(input, chunks[2]);
 
         let footer = Paragraph::new(
-            " Enter: send | Tab: model | /help: commands | /exit: quit | Ctrl+C: quit ",
+            " Enter: send | Tab: model | Ctrl+V: paste | Ctrl+Shift+C: copy output | /help | Ctrl+C: quit ",
         )
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(footer, chunks[3]);
@@ -309,13 +387,32 @@ async fn finish_inflight(
     session: &mut Session,
     store: &SessionStore,
     mut in_flight: InFlight,
+    abort: bool,
 ) {
     while let Ok(event) = in_flight.rx.try_recv() {
         apply_agent_event(app, event);
     }
 
-    match in_flight.handle.await {
-        Ok((updated_session, result)) => {
+    if abort && !in_flight.handle.is_finished() {
+        in_flight.handle.abort();
+        app.push_output(
+            "[cancelled] agent turn aborted",
+            Style::default().fg(Color::Yellow),
+        );
+        app.status = "idle".into();
+        app.end_stream();
+        return;
+    }
+
+    // Never block the UI forever if the agent task stalls after Done.
+    let join_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        &mut in_flight.handle,
+    )
+    .await;
+
+    match join_result {
+        Ok(Ok((updated_session, result))) => {
             while let Ok(event) = in_flight.rx.try_recv() {
                 apply_agent_event(app, event);
             }
@@ -325,10 +422,17 @@ async fn finish_inflight(
             }
             let _ = store.save(session);
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             app.push_output(
                 &format!("Agent task failed: {e}"),
                 Style::default().fg(Color::Red),
+            );
+        }
+        Err(_) => {
+            in_flight.handle.abort();
+            app.push_output(
+                "[timeout] agent task did not finish; aborted so UI can accept input",
+                Style::default().fg(Color::Yellow),
             );
         }
     }
@@ -346,21 +450,37 @@ pub async fn run_tui(
     available_models: Vec<String>,
 ) -> Result<()> {
     use crossterm::{
-        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+        event::{
+            DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+            Event, EventStream, KeyCode, KeyEventKind, KeyModifiers,
+        },
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     };
+    use futures::StreamExt;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
+    // Full clear so we start with a known terminal state.
+    terminal.clear()?;
 
     let mut app = TuiApp::new(session, available_models);
     let mut in_flight: Option<InFlight> = None;
+    // Async event stream — never block a tokio worker with event::poll.
+    // Blocking poll was starving the agent task after the first response on
+    // single-worker / contended runtimes, which made the UI appear hung.
+    let mut events = EventStream::new();
+    let mut should_quit = false;
 
-    loop {
+    while !should_quit {
         terminal.draw(|f| app.render(f))?;
 
         if let Some(ref mut running) = in_flight {
@@ -372,123 +492,183 @@ pub async fn run_tui(
             }
             if done || running.handle.is_finished() {
                 let finished = in_flight.take().expect("in_flight");
-                finish_inflight(&mut app, session, store, finished).await;
+                finish_inflight(&mut app, session, store, finished, false).await;
+                // Resync ratatui's diff buffer if anything wrote to the tty mid-turn.
+                let _ = terminal.clear();
+                continue;
             }
         }
 
-        if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if app.show_model_picker {
-                    match key.code {
-                        KeyCode::Tab => {
-                            let delta = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                -1
-                            } else {
-                                1
-                            };
-                            if let Some(model) = app.cycle_model(delta) {
-                                set_model(&agent, session, &mut app, model);
+        // Wake on key/paste OR a short tick so streaming redraws stay live.
+        tokio::select! {
+            maybe = events.next() => {
+                match maybe {
+                    Some(Ok(event)) => {
+                        if let Event::Paste(text) = &event {
+                            app.paste_into_input(text);
+                            continue;
+                        }
+
+                        let Event::Key(key) = event else {
+                            continue;
+                        };
+                        // Ignore key release/repeat so we don't double-insert on
+                        // terminals that emit Kitty/Windows keyboard events.
+                        if key.kind != KeyEventKind::Press {
+                            continue;
+                        }
+
+                        if app.show_model_picker {
+                            match key.code {
+                                KeyCode::Tab => {
+                                    let delta = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                        -1
+                                    } else {
+                                        1
+                                    };
+                                    if let Some(model) = app.cycle_model(delta) {
+                                        set_model(&agent, session, &mut app, model);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Enter | KeyCode::Esc => {
+                                    app.close_model_picker();
+                                    continue;
+                                }
+                                _ => continue,
                             }
-                            continue;
-                        }
-                        KeyCode::Enter | KeyCode::Esc => {
-                            app.close_model_picker();
-                            continue;
-                        }
-                        _ => continue,
-                    }
-                }
-
-                match key.code {
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Tab => {
-                        if let Some(model) = app.cycle_model(
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                -1
-                            } else {
-                                1
-                            },
-                        ) {
-                            set_model(&agent, session, &mut app, model);
-                        }
-                    }
-                    KeyCode::Enter => {
-                        if in_flight.is_some() {
-                            app.status = "busy — wait for response...".into();
-                            continue;
                         }
 
-                        let input = app.input.trim().to_string();
-                        app.input.clear();
-                        if input.is_empty() {
-                            continue;
-                        }
-
-                        if input.starts_with('/') {
-                            match handle_slash_command(
-                                &input,
-                                &mut app,
-                                session,
-                                store,
-                                agent.clone(),
-                                ssh_manager.as_ref(),
-                                workspace.clone(),
-                                skill_loader.clone(),
-                            )
-                            .await?
+                        match key.code {
+                            KeyCode::Char('c')
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
                             {
-                                CommandOutcome::Quit => break,
-                                CommandOutcome::Continue => {}
+                                app.copy_output();
                             }
-                            continue;
+                            KeyCode::Char('v')
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+                            {
+                                app.paste_from_clipboard();
+                            }
+                            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.paste_from_clipboard();
+                            }
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                should_quit = true;
+                            }
+                            KeyCode::Tab => {
+                                if let Some(model) = app.cycle_model(
+                                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                        -1
+                                    } else {
+                                        1
+                                    },
+                                ) {
+                                    set_model(&agent, session, &mut app, model);
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if in_flight.is_some() {
+                                    app.status = "busy — wait for response...".into();
+                                    continue;
+                                }
+
+                                let input = app.input.trim().to_string();
+                                app.input.clear();
+                                if input.is_empty() {
+                                    continue;
+                                }
+
+                                if input.starts_with('/') {
+                                    match handle_slash_command(
+                                        &input,
+                                        &mut app,
+                                        session,
+                                        store,
+                                        agent.clone(),
+                                        ssh_manager.as_ref(),
+                                        workspace.clone(),
+                                        skill_loader.clone(),
+                                    )
+                                    .await?
+                                    {
+                                        CommandOutcome::Quit => should_quit = true,
+                                        CommandOutcome::Continue => {}
+                                    }
+                                    continue;
+                                }
+
+                                app.end_stream();
+                                app.ensure_newline();
+                                app.output_text.push_str("> ");
+                                app.output_text.push_str(&input);
+                                app.output_text.push('\n');
+                                app.status = "thinking...".into();
+
+                                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                                let agent_clone = agent.clone();
+                                let user_msg = input.clone();
+                                let session_snapshot = session.clone();
+                                let handle = tokio::spawn(async move {
+                                    let mut s = session_snapshot;
+                                    let result = agent_clone
+                                        .run_turn(&mut s, user_msg, Some(tx))
+                                        .await;
+                                    (s, result)
+                                });
+
+                                in_flight = Some(InFlight { handle, rx });
+                            }
+                            KeyCode::Char(c) => {
+                                app.input.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                app.input.pop();
+                            }
+                            KeyCode::Esc => {
+                                if in_flight.is_some() {
+                                    if let Some(running) = in_flight.take() {
+                                        finish_inflight(
+                                            &mut app,
+                                            session,
+                                            store,
+                                            running,
+                                            true,
+                                        )
+                                        .await;
+                                    }
+                                } else {
+                                    app.show_help = false;
+                                    app.close_model_picker();
+                                }
+                            }
+                            _ => {}
                         }
-
-                        app.end_stream();
-                        app.ensure_newline();
-                        app.output_text.push_str("> ");
-                        app.output_text.push_str(&input);
-                        app.output_text.push('\n');
-                        app.status = "thinking...".into();
-
-                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                        let agent_clone = agent.clone();
-                        let user_msg = input.clone();
-                        let session_snapshot = session.clone();
-                        let handle = tokio::spawn(async move {
-                            let mut s = session_snapshot;
-                            let result = agent_clone
-                                .run_turn(&mut s, user_msg, Some(tx))
-                                .await;
-                            (s, result)
-                        });
-
-                        in_flight = Some(InFlight { handle, rx });
                     }
-                    KeyCode::Char(c) => {
-                        app.input.push(c);
+                    Some(Err(e)) => {
+                        return Err(e.into());
                     }
-                    KeyCode::Backspace => {
-                        app.input.pop();
+                    None => {
+                        should_quit = true;
                     }
-                    KeyCode::Esc => {
-                        app.show_help = false;
-                        app.close_model_picker();
-                    }
-                    _ => {}
                 }
             }
-        } else {
-            tokio::task::yield_now().await;
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                // Tick: loop redraws and drains agent events above.
+            }
         }
     }
 
     if let Some(running) = in_flight.take() {
-        finish_inflight(&mut app, session, store, running).await;
+        finish_inflight(&mut app, session, store, running, true).await;
     }
 
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;

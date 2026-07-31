@@ -41,11 +41,9 @@ workspace_trust_required = true
 restrict_to_workspace = true
 confirm_destructive = true
 audit_log = true
-allowed_commands = [
-    "ls", "cat", "grep", "rg", "find", "git", "cargo", "npm", "node",
-    "python", "python3", "make", "go", "rustc", "echo", "pwd", "which",
-    "head", "tail", "wc", "diff", "mkdir", "cp", "mv", "touch",
-]
+# allowed_commands defaults include podman, docker, systemctl, journalctl, ssh, and
+# other common Linux/dev tools. Uncomment to customize:
+# allowed_commands = ["ls", "cat", "podman", ...]
 
 [tools]
 file_tools = true
@@ -66,6 +64,7 @@ summarize_threshold = 100000
 # port = 22
 # user = "deploy"
 # identity_file = "~/.ssh/id_ed25519"
+# Remote exec uses [ssh].allowed_commands (defaults match [safety].allowed_commands).
 
 # [[mcp.servers]]
 # name = "filesystem"

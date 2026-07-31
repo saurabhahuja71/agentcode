@@ -3,7 +3,7 @@ pub mod sandbox;
 pub mod trust;
 
 pub use audit::AuditLogger;
-pub use sandbox::Sandbox;
+pub use sandbox::{validate_allowed_command, Sandbox};
 pub use trust::WorkspaceTrust;
 
 use serde::{Deserialize, Serialize};

@@ -32,11 +32,7 @@ workspace_trust_required = true
 restrict_to_workspace = true
 confirm_destructive = true
 audit_log = true
-allowed_commands = [
-    "ls", "cat", "grep", "rg", "find", "git", "cargo", "npm", "node",
-    "python", "python3", "make", "go", "rustc", "echo", "pwd", "which",
-    "head", "tail", "wc", "diff", "mkdir", "cp", "mv", "touch",
-]
+# Uses default allowed_commands (podman, docker, systemctl, journalctl, ssh, etc.)
 
 [tools]
 file_tools = true

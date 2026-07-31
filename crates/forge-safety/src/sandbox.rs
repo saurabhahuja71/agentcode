@@ -41,28 +41,10 @@ impl Sandbox {
     }
 
     pub fn validate_command(&self, command: &str) -> Result<(), SafetyError> {
-        let trimmed = command.trim();
-        if trimmed.is_empty() {
-            return Err(SafetyError::CommandDenied("empty command".into()));
-        }
+        validate_allowed_command(command, &self.allowed_commands)?;
 
-        let first_token = trimmed
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_start_matches("./");
-
-        let base_cmd = Path::new(first_token)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(first_token);
-
-        if !self.allowed_commands.iter().any(|c| c == base_cmd) {
-            return Err(SafetyError::CommandDenied(base_cmd.to_string()));
-        }
-
-        if self.confirm_destructive && !self.full_auto && is_destructive(trimmed) {
-            return Err(SafetyError::ConfirmationRequired(trimmed.to_string()));
+        if self.confirm_destructive && !self.full_auto && is_destructive(command) {
+            return Err(SafetyError::ConfirmationRequired(command.to_string()));
         }
 
         Ok(())
@@ -71,6 +53,31 @@ impl Sandbox {
     pub fn is_within_workspace(&self, path: &Path) -> bool {
         path.starts_with(&self.workspace)
     }
+}
+
+/// Check that the first token of `command` is in `allowed_commands`.
+pub fn validate_allowed_command(command: &str, allowed_commands: &[String]) -> Result<(), SafetyError> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err(SafetyError::CommandDenied("empty command".into()));
+    }
+
+    let first_token = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("./");
+
+    let base_cmd = Path::new(first_token)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(first_token);
+
+    if !allowed_commands.iter().any(|c| c == base_cmd) {
+        return Err(SafetyError::CommandDenied(base_cmd.to_string()));
+    }
+
+    Ok(())
 }
 
 fn is_destructive(command: &str) -> bool {
