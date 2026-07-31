@@ -74,4 +74,16 @@ mod tests {
             _ => panic!("expected parallel command"),
         }
     }
+
+    #[test]
+    fn parses_exit_command() {
+        assert!(matches!(
+            SlashCommand::parse("/exit"),
+            SlashCommand::Quit
+        ));
+        assert!(matches!(
+            SlashCommand::parse("/quit"),
+            SlashCommand::Quit
+        ));
+    }
 }

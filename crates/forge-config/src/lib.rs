@@ -297,6 +297,68 @@ impl Default for McpConfig {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn available_models_deduplicates_and_includes_agent_default() {
+        let mut config = ForgeConfig::default();
+        config.agent.model = "custom-model".into();
+        config.providers = vec![
+            ProviderConfig {
+                name: "a".into(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: "http://localhost".into(),
+                api_key_env: None,
+                api_key: None,
+                models: vec!["gpt-4o".into(), "gpt-4o-mini".into()],
+                enabled: true,
+                priority: 1,
+            },
+            ProviderConfig {
+                name: "b".into(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: "http://localhost".into(),
+                api_key_env: None,
+                api_key: None,
+                models: vec!["gpt-4o".into(), "llama3.2".into()],
+                enabled: true,
+                priority: 2,
+            },
+        ];
+
+        let models = config.available_models();
+        assert_eq!(
+            models,
+            vec![
+                "custom-model".to_string(),
+                "gpt-4o".to_string(),
+                "gpt-4o-mini".to_string(),
+                "llama3.2".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn available_models_falls_back_to_agent_model() {
+        let mut config = ForgeConfig::default();
+        config.agent.model = "qwen2.5".into();
+        config.providers = vec![ProviderConfig {
+            name: "sglang".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "http://127.0.0.1:30000".into(),
+            api_key_env: None,
+            api_key: None,
+            models: vec![],
+            enabled: true,
+            priority: 1,
+        }];
+
+        assert_eq!(config.available_models(), vec!["qwen2.5".to_string()]);
+    }
+}
+
 impl ForgeConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
@@ -339,5 +401,24 @@ impl ForgeConfig {
         let mut providers: Vec<_> = self.providers.iter().filter(|p| p.enabled).collect();
         providers.sort_by_key(|p| p.priority);
         providers
+    }
+
+    /// All configured models from enabled providers, deduplicated in priority order.
+    /// Falls back to the agent default when no provider lists models.
+    pub fn available_models(&self) -> Vec<String> {
+        let mut models = Vec::new();
+        for provider in self.enabled_providers() {
+            for model in &provider.models {
+                if !models.iter().any(|m| m == model) {
+                    models.push(model.clone());
+                }
+            }
+        }
+        if models.is_empty() {
+            models.push(self.agent.model.clone());
+        } else if !models.iter().any(|m| m == &self.agent.model) {
+            models.insert(0, self.agent.model.clone());
+        }
+        models
     }
 }

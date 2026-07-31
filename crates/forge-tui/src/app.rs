@@ -19,6 +19,9 @@ pub struct TuiApp {
     pub model: String,
     pub session_id: String,
     pub show_help: bool,
+    available_models: Vec<String>,
+    show_model_picker: bool,
+    model_picker_index: usize,
 }
 
 struct InFlight {
@@ -27,7 +30,11 @@ struct InFlight {
 }
 
 impl TuiApp {
-    pub fn new(session: &Session) -> Self {
+    pub fn new(session: &Session, available_models: Vec<String>) -> Self {
+        let model_picker_index = available_models
+            .iter()
+            .position(|m| m == &session.model)
+            .unwrap_or(0);
         Self {
             input: String::new(),
             output_text: "Forge ready. Type a message or /help for commands.\n".into(),
@@ -35,6 +42,9 @@ impl TuiApp {
             model: session.model.clone(),
             session_id: session.id.clone(),
             show_help: false,
+            available_models,
+            show_model_picker: false,
+            model_picker_index,
         }
     }
 
@@ -66,6 +76,39 @@ impl TuiApp {
         if !self.output_text.is_empty() && !self.output_text.ends_with('\n') {
             self.output_text.push('\n');
         }
+    }
+
+    fn current_model_index(&self) -> usize {
+        self.available_models
+            .iter()
+            .position(|m| m == &self.model)
+            .unwrap_or(self.model_picker_index)
+    }
+
+    pub fn open_model_picker(&mut self) {
+        if self.available_models.len() <= 1 {
+            return;
+        }
+        self.model_picker_index = self.current_model_index();
+        self.show_model_picker = true;
+        self.show_help = false;
+    }
+
+    pub fn close_model_picker(&mut self) {
+        self.show_model_picker = false;
+    }
+
+    pub fn cycle_model(&mut self, delta: isize) -> Option<String> {
+        if self.available_models.is_empty() {
+            return None;
+        }
+        if !self.show_model_picker {
+            self.open_model_picker();
+        }
+        let len = self.available_models.len() as isize;
+        let next = (self.model_picker_index as isize + delta).rem_euclid(len) as usize;
+        self.model_picker_index = next;
+        Some(self.available_models[next].clone())
     }
 
     pub fn render(&self, frame: &mut Frame) {
@@ -106,12 +149,18 @@ impl TuiApp {
             .style(Style::default().fg(Color::White));
         frame.render_widget(input, chunks[2]);
 
-        let footer = Paragraph::new(" Enter: send | /help: commands | Ctrl+C: quit ")
+        let footer = Paragraph::new(
+            " Enter: send | Tab: model | /help: commands | /exit: quit | Ctrl+C: quit ",
+        )
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(footer, chunks[3]);
 
         if self.show_help {
             self.render_help(frame, area);
+        }
+
+        if self.show_model_picker {
+            self.render_model_picker(frame, area);
         }
     }
 
@@ -128,6 +177,7 @@ impl TuiApp {
             "/resume    - Resume last session",
             "/skills    - List loaded skills",
             "/quit      - Exit",
+            "/exit      - Exit",
         ];
         let items: Vec<ListItem> = help_text.iter().map(|s| ListItem::new(*s)).collect();
         let help = List::new(items).block(
@@ -137,6 +187,37 @@ impl TuiApp {
                 .style(Style::default().bg(Color::Black)),
         );
         frame.render_widget(help, help_area);
+    }
+
+    fn render_model_picker(&self, frame: &mut Frame, area: Rect) {
+        let picker_area = centered_rect(50, 40, area);
+        let items: Vec<ListItem> = self
+            .available_models
+            .iter()
+            .enumerate()
+            .map(|(idx, model)| {
+                let prefix = if idx == self.model_picker_index {
+                    "▸ "
+                } else {
+                    "  "
+                };
+                let style = if idx == self.model_picker_index {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(format!("{prefix}{model}")).style(style)
+            })
+            .collect();
+        let picker = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Select Model (Tab/Shift+Tab, Enter/Esc) ")
+                .style(Style::default().bg(Color::Black)),
+        );
+        frame.render_widget(picker, picker_area);
     }
 }
 
@@ -158,6 +239,25 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn set_model(
+    agent: &std::sync::Arc<Agent>,
+    session: &mut Session,
+    app: &mut TuiApp,
+    model: String,
+) {
+    agent.set_model(model.clone());
+    session.model = model.clone();
+    app.model = model;
+    if let Some(idx) = app.available_models.iter().position(|m| m == &app.model) {
+        app.model_picker_index = idx;
+    }
+}
+
+enum CommandOutcome {
+    Continue,
+    Quit,
 }
 
 fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
@@ -243,6 +343,7 @@ pub async fn run_tui(
     ssh_manager: Option<std::sync::Arc<forge_ssh::SshManager>>,
     workspace: std::path::PathBuf,
     skill_loader: std::sync::Arc<forge_tool::SkillLoader>,
+    available_models: Vec<String>,
 ) -> Result<()> {
     use crossterm::{
         event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
@@ -256,7 +357,7 @@ pub async fn run_tui(
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    let mut app = TuiApp::new(session);
+    let mut app = TuiApp::new(session, available_models);
     let mut in_flight: Option<InFlight> = None;
 
     loop {
@@ -277,8 +378,40 @@ pub async fn run_tui(
 
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if app.show_model_picker {
+                    match key.code {
+                        KeyCode::Tab => {
+                            let delta = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                -1
+                            } else {
+                                1
+                            };
+                            if let Some(model) = app.cycle_model(delta) {
+                                set_model(&agent, session, &mut app, model);
+                            }
+                            continue;
+                        }
+                        KeyCode::Enter | KeyCode::Esc => {
+                            app.close_model_picker();
+                            continue;
+                        }
+                        _ => continue,
+                    }
+                }
+
                 match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Tab => {
+                        if let Some(model) = app.cycle_model(
+                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                -1
+                            } else {
+                                1
+                            },
+                        ) {
+                            set_model(&agent, session, &mut app, model);
+                        }
+                    }
                     KeyCode::Enter => {
                         if in_flight.is_some() {
                             app.status = "busy — wait for response...".into();
@@ -292,7 +425,7 @@ pub async fn run_tui(
                         }
 
                         if input.starts_with('/') {
-                            handle_slash_command(
+                            match handle_slash_command(
                                 &input,
                                 &mut app,
                                 session,
@@ -302,7 +435,11 @@ pub async fn run_tui(
                                 workspace.clone(),
                                 skill_loader.clone(),
                             )
-                            .await?;
+                            .await?
+                            {
+                                CommandOutcome::Quit => break,
+                                CommandOutcome::Continue => {}
+                            }
                             continue;
                         }
 
@@ -335,6 +472,7 @@ pub async fn run_tui(
                     }
                     KeyCode::Esc => {
                         app.show_help = false;
+                        app.close_model_picker();
                     }
                     _ => {}
                 }
@@ -367,7 +505,7 @@ async fn handle_slash_command(
     ssh_manager: Option<&std::sync::Arc<forge_ssh::SshManager>>,
     workspace: std::path::PathBuf,
     skill_loader: std::sync::Arc<forge_tool::SkillLoader>,
-) -> Result<()> {
+) -> Result<CommandOutcome> {
     use crate::commands::SlashCommand;
     let cmd = SlashCommand::parse(input);
     match cmd {
@@ -379,9 +517,7 @@ async fn handle_slash_command(
         }
         SlashCommand::Model(args) => {
             if let Some(model) = args {
-                agent.set_model(model.clone());
-                session.model = model.clone();
-                app.model = model.clone();
+                set_model(&agent, session, app, model.clone());
                 app.push_output(
                     &format!("Model set to {model}"),
                     Style::default().fg(Color::Yellow),
@@ -391,6 +527,12 @@ async fn handle_slash_command(
                     &format!("Current model: {}", app.model),
                     Style::default().fg(Color::Yellow),
                 );
+                if !app.available_models.is_empty() {
+                    app.push_output(
+                        &format!("Available: {}", app.available_models.join(", ")),
+                        Style::default().fg(Color::DarkGray),
+                    );
+                }
             }
         }
         SlashCommand::Tools => {
@@ -486,7 +628,7 @@ async fn handle_slash_command(
             }
         }
         SlashCommand::Quit => {
-            app.push_output("Use Ctrl+C to quit", Style::default().fg(Color::DarkGray));
+            return Ok(CommandOutcome::Quit);
         }
         SlashCommand::Unknown(cmd) => {
             app.push_output(
@@ -495,7 +637,7 @@ async fn handle_slash_command(
             );
         }
     }
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
 async fn handle_ssh_command(args: Vec<String>, app: &mut TuiApp, mgr: &forge_ssh::SshManager) {

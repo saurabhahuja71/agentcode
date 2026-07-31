@@ -209,6 +209,7 @@ async fn main() -> Result<()> {
                 Some(ssh_manager),
                 workspace.clone(),
                 skill_loader.clone(),
+                forge_config.available_models(),
             )
             .await?;
         }
@@ -225,6 +226,7 @@ async fn main() -> Result<()> {
                 Some(ssh_manager),
                 workspace.clone(),
                 skill_loader.clone(),
+                forge_config.available_models(),
             )
             .await?;
         }
