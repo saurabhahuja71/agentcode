@@ -297,40 +297,41 @@ impl Agent {
                         .push_str(&arguments_delta);
                 }
                 StreamEvent::Done(resp) => {
+                    let mut final_tool_calls = if tool_calls.is_empty() {
+                        if let Message::Assistant { tool_calls: Some(ref tc), .. } = resp.message {
+                            tc.clone()
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        tool_calls
+                    };
+
+                    for (i, tc) in final_tool_calls.iter_mut().enumerate() {
+                        if tc.id.is_empty() {
+                            tc.id = format!("call_{}", i);
+                        }
+                    }
+
                     if content.is_empty() {
                         if let Message::Assistant {
                             content: Some(c),
-                            tool_calls: tc,
+                            ..
                         } = resp.message.clone()
                         {
                             if !c.is_empty() {
                                 emit(AgentEvent::ContentDelta { text: c.clone() });
                                 content = c;
                             }
-                            return Ok(forge_provider::ChatResponse {
-                                message: Message::Assistant {
-                                    content: if content.is_empty() { None } else { Some(content) },
-                                    tool_calls: tc,
-                                },
-                                finish_reason: resp.finish_reason,
-                                usage: resp.usage,
-                            });
                         }
                     }
+
                     return Ok(forge_provider::ChatResponse {
                         message: Message::Assistant {
-                            content: if content.is_empty() {
-                                None
-                            } else {
-                                Some(content)
-                            },
-                            tool_calls: if tool_calls.is_empty() {
-                                None
-                            } else {
-                                Some(tool_calls)
-                            },
+                            content: if content.is_empty() { None } else { Some(content) },
+                            tool_calls: if final_tool_calls.is_empty() { None } else { Some(final_tool_calls) },
                         },
-                        finish_reason: Some("stop".into()),
+                        finish_reason: resp.finish_reason,
                         usage: resp.usage,
                     });
                 }
@@ -338,6 +339,12 @@ impl Agent {
                     emit(AgentEvent::Error { message: e.clone() });
                     return Err(anyhow::anyhow!(e));
                 }
+            }
+        }
+
+        for (i, tc) in tool_calls.iter_mut().enumerate() {
+            if tc.id.is_empty() {
+                tc.id = format!("call_{}", i);
             }
         }
 

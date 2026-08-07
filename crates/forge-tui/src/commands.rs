@@ -10,6 +10,7 @@ pub enum SlashCommand {
     Resume,
     Skills,
     Quit,
+    ToggleMouse,
     Unknown(String),
 }
 
@@ -47,6 +48,7 @@ impl SlashCommand {
             "ssh" => SlashCommand::Ssh(parts[1..].iter().map(|s| s.to_string()).collect()),
             "resume" => SlashCommand::Resume,
             "skills" => SlashCommand::Skills,
+            "toggle-mouse" | "mouse" => SlashCommand::ToggleMouse,
             "quit" | "exit" => SlashCommand::Quit,
             other => SlashCommand::Unknown(other.to_string()),
         }

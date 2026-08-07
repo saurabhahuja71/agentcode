@@ -32,15 +32,22 @@ pub enum Message {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
+    #[serde(default)]
     pub id: String,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default = "default_call_type")]
     pub call_type: String,
     pub function: FunctionCall,
 }
 
+fn default_call_type() -> String {
+    "function".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub arguments: String,
 }
 

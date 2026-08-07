@@ -8,8 +8,287 @@ use ratatui::{
     Frame,
 };
 use std::io;
+use std::time::Instant;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
+
+fn parse_line_markdown<'a>(
+    line_str: &'a str,
+    base_idx: usize,
+    sel_start: usize,
+    sel_end: usize,
+    inside_code_block: bool,
+    is_indicator: bool,
+    default_fg: Color,
+) -> Line<'a> {
+    let mut spans = Vec::new();
+    let is_header = line_str.starts_with("#");
+    let is_prompt = line_str.starts_with("> ");
+    
+    let line_fg = if is_indicator {
+        default_fg
+    } else if inside_code_block {
+        Color::LightYellow
+    } else if is_prompt {
+        Color::Cyan
+    } else if is_header {
+        Color::Cyan
+    } else {
+        Color::White
+    };
+    
+    let default_modifier = if is_header || is_prompt {
+        Modifier::BOLD
+    } else {
+        Modifier::empty()
+    };
+
+    let mut append_styled = |text: &str, fg: Color, modifier: Modifier, start_rel_offset: usize| {
+        let abs_start = base_idx + start_rel_offset;
+        let abs_end = abs_start + text.len();
+        let has_selection = sel_start != sel_end && abs_start < sel_end && abs_end > sel_start;
+        
+        if has_selection {
+            let chars: Vec<(usize, char)> = text.char_indices().collect();
+            let mut current_segment = String::new();
+            let mut segment_selected = false;
+            
+            for (idx, (byte_idx, c)) in chars.iter().enumerate() {
+                let char_abs = abs_start + byte_idx;
+                let is_char_selected = char_abs >= sel_start && char_abs < sel_end;
+                
+                if idx == 0 {
+                    segment_selected = is_char_selected;
+                    current_segment.push(*c);
+                } else if is_char_selected == segment_selected {
+                    current_segment.push(*c);
+                } else {
+                    let style = if segment_selected {
+                        Style::default().bg(Color::Rgb(50, 75, 110)).fg(Color::White).add_modifier(modifier)
+                    } else {
+                        Style::default().fg(fg).add_modifier(modifier)
+                    };
+                    spans.push(Span::styled(current_segment, style));
+                    segment_selected = is_char_selected;
+                    current_segment = c.to_string();
+                }
+            }
+            if !current_segment.is_empty() {
+                let style = if segment_selected {
+                    Style::default().bg(Color::Rgb(50, 75, 110)).fg(Color::White).add_modifier(modifier)
+                } else {
+                    Style::default().fg(fg).add_modifier(modifier)
+                };
+                spans.push(Span::styled(current_segment, style));
+            }
+        } else {
+            spans.push(Span::styled(text.to_string(), Style::default().fg(fg).add_modifier(modifier)));
+        }
+    };
+
+    if is_indicator {
+        append_styled(line_str, default_fg, Modifier::empty(), 0);
+    } else if inside_code_block {
+        append_styled(line_str, line_fg, Modifier::empty(), 0);
+    } else if is_header {
+        append_styled(line_str, Color::Cyan, Modifier::BOLD, 0);
+    } else if is_prompt {
+        append_styled(line_str, Color::Cyan, Modifier::BOLD, 0);
+    } else {
+        let mut display_str = line_str;
+        let mut offset = 0;
+        
+        let trimmed = line_str.trim_start();
+        let leading_whitespace_len = line_str.len() - trimmed.len();
+        
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            if leading_whitespace_len > 0 {
+                append_styled(&line_str[..leading_whitespace_len], Color::White, Modifier::empty(), 0);
+            }
+            append_styled("• ", Color::Cyan, Modifier::BOLD, leading_whitespace_len);
+            display_str = &trimmed[2..];
+            offset = leading_whitespace_len + 2;
+        }
+        
+        let chars: Vec<(usize, char)> = display_str.char_indices().collect();
+        let mut i = 0;
+        let mut normal_start_idx = 0;
+        
+        while i < chars.len() {
+            if i + 1 < chars.len() && chars[i].1 == '*' && chars[i+1].1 == '*' {
+                if chars[i].0 > normal_start_idx {
+                    append_styled(&display_str[normal_start_idx..chars[i].0], line_fg, default_modifier, offset + normal_start_idx);
+                }
+                
+                let mut bold_end_char_idx = i + 2;
+                let mut found_bold_close = false;
+                while bold_end_char_idx + 1 < chars.len() {
+                    if chars[bold_end_char_idx].1 == '*' && chars[bold_end_char_idx+1].1 == '*' {
+                        found_bold_close = true;
+                        break;
+                    }
+                    bold_end_char_idx += 1;
+                }
+                
+                if found_bold_close {
+                    let content_start = chars[i+2].0;
+                    let content_end = chars[bold_end_char_idx].0;
+                    append_styled(&display_str[content_start..content_end], Color::Yellow, Modifier::BOLD, offset + content_start);
+                    i = bold_end_char_idx + 2;
+                    normal_start_idx = if i < chars.len() { chars[i].0 } else { display_str.len() };
+                    continue;
+                }
+            }
+            
+            if chars[i].1 == '`' {
+                if chars[i].0 > normal_start_idx {
+                    append_styled(&display_str[normal_start_idx..chars[i].0], line_fg, default_modifier, offset + normal_start_idx);
+                }
+                
+                let mut code_end_char_idx = i + 1;
+                let mut found_code_close = false;
+                while code_end_char_idx < chars.len() {
+                    if chars[code_end_char_idx].1 == '`' {
+                        found_code_close = true;
+                        break;
+                    }
+                    code_end_char_idx += 1;
+                }
+                
+                if found_code_close {
+                    let content_start = chars[i+1].0;
+                    let content_end = chars[code_end_char_idx].0;
+                    append_styled(&display_str[content_start..content_end], Color::Magenta, Modifier::empty(), offset + content_start);
+                    i = code_end_char_idx + 1;
+                    normal_start_idx = if i < chars.len() { chars[i].0 } else { display_str.len() };
+                    continue;
+                }
+            }
+            
+            i += 1;
+        }
+        
+        if normal_start_idx < display_str.len() {
+            append_styled(&display_str[normal_start_idx..], line_fg, default_modifier, offset + normal_start_idx);
+        }
+    }
+
+    Line::from(spans)
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<std::ops::Range<usize>> {
+    let mut lines = Vec::new();
+    let mut start_idx = 0;
+    
+    for line in text.split('\n') {
+        let line_len = line.len();
+        if line_len == 0 {
+            lines.push(start_idx..start_idx);
+            start_idx += 1; // account for \n
+            continue;
+        }
+        
+        let chars: Vec<(usize, char)> = line.char_indices().collect();
+        let mut i = 0;
+        
+        while i < chars.len() {
+            let mut word_end_char_idx = i;
+            let mut width_so_far = 0;
+            let mut last_space_char_idx = None;
+            
+            while word_end_char_idx < chars.len() {
+                let (_, c) = chars[word_end_char_idx];
+                let c_width = if c == '\t' { 4 } else { 1 };
+                if width_so_far + c_width > width {
+                    break;
+                }
+                width_so_far += c_width;
+                if c == ' ' {
+                    last_space_char_idx = Some(word_end_char_idx);
+                }
+                word_end_char_idx += 1;
+            }
+            
+            let break_char_idx = if word_end_char_idx == chars.len() {
+                word_end_char_idx
+            } else if let Some(space_idx) = last_space_char_idx {
+                space_idx + 1
+            } else {
+                word_end_char_idx
+            };
+            
+            let break_char_idx = if break_char_idx <= i {
+                i + 1
+            } else {
+                break_char_idx
+            };
+            
+            let byte_start = start_idx + chars[i].0;
+            let byte_end = if break_char_idx < chars.len() {
+                start_idx + chars[break_char_idx].0
+            } else {
+                start_idx + line_len
+            };
+            
+            lines.push(byte_start..byte_end);
+            i = break_char_idx;
+        }
+        
+        start_idx += line_len + 1; // account for \n
+    }
+    lines
+}
+
+fn write_clipboard(text: &str, app: &mut TuiApp) -> bool {
+    app.yank_buffer = text.to_string();
+    
+    let local_res = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.to_string()));
+    let osc_res = write_osc52(text);
+    
+    local_res.is_ok() || osc_res.is_ok()
+}
+
+fn write_osc52(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    
+    let encoded = STANDARD.encode(text);
+    let osc_sequence = format!("\x1B]52;c;{}\x07", encoded);
+    
+    let mut stdout = std::io::stdout();
+    stdout.write_all(osc_sequence.as_bytes())?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn clean_copied_text(text: &str) -> String {
+    let re_ansi = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
+    let cleaned = re_ansi.replace_all(text, "").into_owned();
+    
+    let mut lines = Vec::new();
+    for line in cleaned.lines() {
+        let mut l = line;
+        if l.starts_with("⊘ Running ") {
+            l = &l["⊘ Running ".len()..];
+        } else if l.starts_with("✔ ") {
+            l = &l["✔ ".len()..];
+        } else if l.starts_with("❌ ") {
+            l = &l["❌ ".len()..];
+        } else if l.starts_with("> ") {
+            l = &l["> ".len()..];
+        }
+        lines.push(l);
+    }
+    
+    lines.join("\n")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClickType {
+    Single,
+    Double,
+    Triple,
+}
 
 pub struct TuiApp {
     pub input: String,
@@ -22,6 +301,18 @@ pub struct TuiApp {
     available_models: Vec<String>,
     show_model_picker: bool,
     model_picker_index: usize,
+
+    // NEW FIELDS FOR TEXT SELECTION AND MOUSE
+    pub last_output_area: std::cell::Cell<Rect>,
+    pub selection: Option<(usize, usize)>,
+    pub is_selecting_mouse: bool,
+    pub double_click_state: Option<(Instant, usize)>,
+    pub last_click_type: ClickType,
+    pub yank_buffer: String,
+    pub mouse_enabled: bool,
+    pub input_cursor_idx: usize,
+    pub input_selection_start: Option<usize>,
+    pub scroll_offset: Option<u16>,
 }
 
 struct InFlight {
@@ -45,6 +336,16 @@ impl TuiApp {
             available_models,
             show_model_picker: false,
             model_picker_index,
+            last_output_area: std::cell::Cell::new(Rect::default()),
+            selection: None,
+            is_selecting_mouse: false,
+            double_click_state: None,
+            last_click_type: ClickType::Single,
+            yank_buffer: String::new(),
+            mouse_enabled: true,
+            input_cursor_idx: 0,
+            input_selection_start: None,
+            scroll_offset: None,
         }
     }
 
@@ -54,15 +355,18 @@ impl TuiApp {
         }
     }
 
+    fn normalize_trailing_newlines(&mut self) {
+        self.output_text = self.output_text.trim_end().to_string();
+        self.output_text.push('\n');
+    }
+
     pub fn push_output(&mut self, text: &str, _style: Style) {
         if text.is_empty() {
             return;
         }
         self.ensure_newline();
         self.output_text.push_str(text);
-        if !text.ends_with('\n') {
-            self.output_text.push('\n');
-        }
+        self.normalize_trailing_newlines();
         self.trim_output_if_needed();
     }
 
@@ -91,41 +395,271 @@ impl TuiApp {
     }
 
     pub fn end_stream(&mut self) {
-        if !self.output_text.is_empty() && !self.output_text.ends_with('\n') {
-            self.output_text.push('\n');
-        }
+        self.normalize_trailing_newlines();
     }
 
     fn paste_into_input(&mut self, text: &str) {
-        for ch in text.chars() {
-            if ch == '\n' || ch == '\r' {
-                break;
-            }
-            self.input.push(ch);
+        self.delete_selected_input();
+        let mut chars: Vec<char> = self.input.chars().collect();
+        for (i, ch) in text.chars().enumerate() {
+            chars.insert(self.input_cursor_idx + i, ch);
         }
+        self.input_cursor_idx += text.chars().count();
+        self.input = chars.into_iter().collect();
     }
 
     fn copy_output(&mut self) -> bool {
-        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(self.output_text.clone())) {
-            Ok(()) => {
-                self.status = "copied output".into();
-                true
-            }
-            Err(_) => {
-                self.status = "clipboard unavailable".into();
-                false
-            }
+        let cleaned = clean_copied_text(&self.output_text);
+        if write_clipboard(&cleaned, self) {
+            self.status = "copied output".into();
+            true
+        } else {
+            self.status = "clipboard unavailable".into();
+            false
         }
     }
 
-    fn paste_from_clipboard(&mut self) -> bool {
-        match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-            Ok(text) => {
-                self.paste_into_input(&text);
-                true
+    pub fn copy_selection(&mut self) -> bool {
+        if let Some((s, e)) = self.selection {
+            let start = s.min(e);
+            let end = s.max(e);
+            if start < end {
+                let selected_raw = &self.output_text[start..end];
+                let cleaned = clean_copied_text(selected_raw);
+                if !cleaned.is_empty() {
+                    if write_clipboard(&cleaned, self) {
+                        self.status = "copied selection".into();
+                        return true;
+                    }
+                }
             }
-            Err(_) => false,
         }
+        false
+    }
+
+    fn paste_from_clipboard(&mut self) -> bool {
+        let local_text = arboard::Clipboard::new().ok().and_then(|mut cb| cb.get_text().ok());
+        if let Some(text) = local_text {
+            self.paste_into_input(&text);
+            true
+        } else if !self.yank_buffer.is_empty() {
+            let text = self.yank_buffer.clone();
+            self.paste_into_input(&text);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get_input_selection_range(&self) -> Option<(usize, usize)> {
+        if let Some(start) = self.input_selection_start {
+            let end = self.input_cursor_idx;
+            Some((start.min(end), start.max(end)))
+        } else {
+            None
+        }
+    }
+
+    pub fn delete_selected_input(&mut self) -> bool {
+        if let Some((start, end)) = self.get_input_selection_range() {
+            let chars: Vec<char> = self.input.chars().collect();
+            let mut new_chars = Vec::new();
+            new_chars.extend_from_slice(&chars[..start]);
+            new_chars.extend_from_slice(&chars[end..]);
+            self.input = new_chars.into_iter().collect();
+            self.input_cursor_idx = start;
+            self.input_selection_start = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get_styled_output_lines(&self) -> Vec<Line<'_>> {
+        let mut lines = Vec::new();
+        let text = &self.output_text;
+        
+        let (sel_start, sel_end) = match self.selection {
+            Some((s, e)) => (s.min(e), s.max(e)),
+            None => (0, 0),
+        };
+        
+        let mut current_idx = 0;
+        let mut inside_code_block = false;
+        
+        for line_str in text.split('\n') {
+            let line_len = line_str.len();
+            
+            let trimmed = line_str.trim();
+            if trimmed.starts_with("```") {
+                inside_code_block = !inside_code_block;
+                let line_with_sel = parse_line_markdown(line_str, current_idx, sel_start, sel_end, false, true, Color::DarkGray);
+                lines.push(line_with_sel);
+            } else {
+                let line_with_sel = parse_line_markdown(line_str, current_idx, sel_start, sel_end, inside_code_block, false, Color::White);
+                lines.push(line_with_sel);
+            }
+            
+            current_idx += line_len + 1;
+        }
+        lines
+    }
+
+    pub fn get_styled_input_lines(&self) -> Vec<Line<'_>> {
+        let mut lines = Vec::new();
+        let (sel_start, sel_end) = match self.get_input_selection_range() {
+            Some((s, e)) => (s, e),
+            None => (0, 0),
+        };
+        
+        let text = &self.input;
+        let mut current_line_spans = Vec::new();
+        let chars: Vec<char> = text.chars().collect();
+        
+        for (idx, &c) in chars.iter().enumerate() {
+            if c == '\n' {
+                lines.push(Line::from(current_line_spans));
+                current_line_spans = Vec::new();
+            } else {
+                let is_selected = idx >= sel_start && idx < sel_end;
+                let style = if is_selected {
+                    Style::default().bg(Color::Rgb(50, 75, 110)).fg(Color::White)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                current_line_spans.push(Span::styled(c.to_string(), style));
+            }
+        }
+        lines.push(Line::from(current_line_spans));
+        
+        lines
+    }
+
+    pub fn get_input_cursor_row_col(&self) -> (u16, u16) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut row = 0;
+        let mut col = 0;
+        for (idx, &c) in chars.iter().enumerate() {
+            if idx >= self.input_cursor_idx {
+                break;
+            }
+            if c == '\n' {
+                row += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
+        (row, col)
+    }
+
+    pub fn map_coordinates_to_char_idx(&self, x: u16, y: u16) -> Option<usize> {
+        let area = self.last_output_area.get();
+        if area.width <= 2 || area.height <= 2 {
+            return None;
+        }
+        let inner_x = area.x + 1;
+        let inner_y = area.y + 1;
+        let inner_w = area.width - 2;
+        let inner_h = area.height - 2;
+        
+        if x < inner_x || x >= inner_x + inner_w || y < inner_y || y >= inner_y + inner_h {
+            return None;
+        }
+        
+        let scroll_y = self.output_scroll_y(area.width, area.height);
+        let wrapped_line_idx = (y - inner_y) + scroll_y;
+        
+        let wrapped_lines = wrap_text(&self.output_text, inner_w as usize);
+        if (wrapped_line_idx as usize) < wrapped_lines.len() {
+            let range = &wrapped_lines[wrapped_line_idx as usize];
+            let col = (x - inner_x) as usize;
+            
+            let line_sub = &self.output_text[range.start..range.end];
+            let mut byte_offset = 0;
+            for (char_idx, (b_idx, _)) in line_sub.char_indices().enumerate() {
+                if char_idx == col {
+                    byte_offset = b_idx;
+                    break;
+                }
+                byte_offset = b_idx + 1;
+            }
+            Some(range.start + byte_offset)
+        } else {
+            None
+        }
+    }
+
+    pub fn select_word_at(&mut self, char_idx: usize) {
+        let text = &self.output_text;
+        if char_idx >= text.len() {
+            return;
+        }
+        
+        let mut word_start = char_idx;
+        while word_start > 0 {
+            let prev_char = text[..word_start].chars().next_back();
+            if let Some(c) = prev_char {
+                if c.is_alphanumeric() || c == '_' {
+                    word_start -= c.len_utf8();
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        
+        let mut word_end = char_idx;
+        while word_end < text.len() {
+            let next_char = text[word_end..].chars().next();
+            if let Some(c) = next_char {
+                if c.is_alphanumeric() || c == '_' {
+                    word_end += c.len_utf8();
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        
+        self.selection = Some((word_start, word_end));
+    }
+
+    pub fn select_line_at(&mut self, char_idx: usize) {
+        let text = &self.output_text;
+        if char_idx >= text.len() {
+            return;
+        }
+        
+        let mut line_start = char_idx;
+        while line_start > 0 {
+            let prev_char = text[..line_start].chars().next_back();
+            if let Some(c) = prev_char {
+                if c == '\n' {
+                    break;
+                }
+                line_start -= c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        
+        let mut line_end = char_idx;
+        while line_end < text.len() {
+            let next_char = text[line_end..].chars().next();
+            if let Some(c) = next_char {
+                if c == '\n' {
+                    break;
+                }
+                line_end += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        
+        self.selection = Some((line_start, line_end));
     }
 
     fn current_model_index(&self) -> usize {
@@ -188,6 +722,13 @@ impl TuiApp {
             ])
             .split(area);
 
+        self.last_output_area.set(chunks[1]);
+
+        let status_style = if self.status == "idle" {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        };
         let header = Paragraph::new(Line::from(vec![
             Span::styled(" Forge ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw(" | "),
@@ -198,38 +739,35 @@ impl TuiApp {
                 Style::default().fg(Color::DarkGray),
             ),
             Span::raw(" | "),
-            Span::styled(&self.status, Style::default().fg(Color::Green)),
+            Span::styled(&self.status, status_style),
         ]));
         frame.render_widget(header, chunks[0]);
 
         let scroll_y = self.output_scroll_y(chunks[1].width, chunks[1].height);
-        let output = Paragraph::new(self.output_text.as_str())
+        let output = Paragraph::new(self.get_styled_output_lines())
             .block(Block::default().borders(Borders::ALL).title(" Output "))
-            .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false })
             .scroll((scroll_y, 0));
         frame.render_widget(output, chunks[1]);
 
-        // Horizontal scroll so long input stays usable; empty input always shows blank.
-        let input_inner_w = chunks[2].width.saturating_sub(2) as usize;
-        let input_scroll_x = if input_inner_w == 0 {
-            0u16
-        } else {
-            self.input
-                .chars()
-                .count()
-                .saturating_sub(input_inner_w.saturating_sub(1))
-                .min(u16::MAX as usize) as u16
-        };
-        let input = Paragraph::new(self.input.as_str())
+        let (input_row, input_col) = self.get_input_cursor_row_col();
+        let input_inner_h = chunks[2].height.saturating_sub(2);
+        let input_scroll_y = input_row.saturating_sub(input_inner_h.saturating_sub(1));
+        
+        let input_inner_w = chunks[2].width.saturating_sub(2);
+        let input_scroll_x = input_col.saturating_sub(input_inner_w.saturating_sub(1));
+
+        let input = Paragraph::new(self.get_styled_input_lines())
             .block(Block::default().borders(Borders::ALL).title(" Input "))
-            .style(Style::default().fg(Color::White))
-            .scroll((0, input_scroll_x));
+            .scroll((input_scroll_y, input_scroll_x));
         frame.render_widget(input, chunks[2]);
 
-        let footer = Paragraph::new(
-            " Enter: send | Tab: model | Ctrl+V: paste | Ctrl+Shift+C: copy output | /help | Ctrl+C: quit ",
-        )
+        let footer_text = if self.status == "idle" {
+            " Enter: send | Tab: model | Ctrl+V: paste | Ctrl+C: copy/quit | /mouse: toggle | /help | Esc: clear sel "
+        } else {
+            " Esc / Ctrl+C: interrupt generation | /mouse: toggle "
+        };
+        let footer = Paragraph::new(footer_text)
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(footer, chunks[3]);
 
@@ -240,6 +778,11 @@ impl TuiApp {
         if self.show_model_picker {
             self.render_model_picker(frame, area);
         }
+
+        // Place blinking terminal cursor at the scroll-adjusted cursor coordinate
+        let cursor_x = chunks[2].x + 1 + input_col.saturating_sub(input_scroll_x);
+        let cursor_y = chunks[2].y + 1 + input_row.saturating_sub(input_scroll_y);
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 
     fn render_help(&self, frame: &mut Frame, area: Rect) {
@@ -345,23 +888,52 @@ fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
         }
         AgentEvent::ToolCallStart { name, arguments } => {
             app.end_stream();
+            let args_short = if arguments.len() > 80 {
+                format!("{}...", &arguments[..80])
+            } else {
+                arguments
+            };
             app.push_output(
-                &format!("[tool] {name}({arguments})"),
+                &format!("⊘ Running {name}({args_short})"),
                 Style::default().fg(Color::Magenta),
             );
         }
         AgentEvent::ToolCallEnd { name, output, is_error } => {
             app.end_stream();
-            let truncated = if output.len() > 500 {
-                format!("{}...", &output[..500])
+            if is_error {
+                let truncated = if output.len() > 200 {
+                    format!("{}...", &output[..200])
+                } else {
+                    output
+                };
+                app.push_output(
+                    &format!("❌ {name} failed: {truncated}"),
+                    Style::default().fg(Color::Red),
+                );
             } else {
-                output
-            };
-            let label = if is_error { "[error]" } else { "[ok]" };
-            app.push_output(
-                &format!("{label} {name}: {truncated}"),
-                Style::default().fg(if is_error { Color::Red } else { Color::Green }),
-            );
+                let line_count = output.lines().count();
+                if line_count > 1 {
+                    app.push_output(
+                        &format!("✔ {name} completed ({line_count} lines of output)"),
+                        Style::default().fg(Color::Green),
+                    );
+                } else if !output.is_empty() {
+                    let truncated = if output.len() > 80 {
+                        format!("{}...", &output[..80])
+                    } else {
+                        output
+                    };
+                    app.push_output(
+                        &format!("✔ {name} completed: {truncated}"),
+                        Style::default().fg(Color::Green),
+                    );
+                } else {
+                    app.push_output(
+                        &format!("✔ {name} completed"),
+                        Style::default().fg(Color::Green),
+                    );
+                }
+            }
         }
         AgentEvent::Error { message } => {
             app.end_stream();
@@ -451,7 +1023,7 @@ pub async fn run_tui(
 ) -> Result<()> {
     use crossterm::{
         event::{
-            DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+            DisableBracketedPaste, EnableBracketedPaste,
             Event, EventStream, KeyCode, KeyEventKind, KeyModifiers,
         },
         execute,
@@ -464,7 +1036,6 @@ pub async fn run_tui(
     execute!(
         stdout,
         EnterAlternateScreen,
-        EnableMouseCapture,
         EnableBracketedPaste
     )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
@@ -480,7 +1051,20 @@ pub async fn run_tui(
     let mut events = EventStream::new();
     let mut should_quit = false;
 
+    let mut current_mouse_state = app.mouse_enabled;
+    if current_mouse_state {
+        execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
+    }
+
     while !should_quit {
+        if app.mouse_enabled != current_mouse_state {
+            if app.mouse_enabled {
+                execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
+            } else {
+                execute!(io::stdout(), crossterm::event::DisableMouseCapture)?;
+            }
+            current_mouse_state = app.mouse_enabled;
+        }
         terminal.draw(|f| app.render(f))?;
 
         if let Some(ref mut running) = in_flight {
@@ -499,8 +1083,7 @@ pub async fn run_tui(
             }
         }
 
-        // Wake on key/paste OR a short tick so streaming redraws stay live.
-        tokio::select! {
+                tokio::select! {
             maybe = events.next() => {
                 match maybe {
                     Some(Ok(event)) => {
@@ -509,11 +1092,93 @@ pub async fn run_tui(
                             continue;
                         }
 
+                        if let Event::Mouse(mouse_event) = event {
+                            if app.mouse_enabled {
+                                match mouse_event.kind {
+                                    crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                                        if let Some(char_idx) = app.map_coordinates_to_char_idx(mouse_event.column, mouse_event.row) {
+                                            app.is_selecting_mouse = true;
+                                            app.selection = Some((char_idx, char_idx));
+                                            
+                                            let now = Instant::now();
+                                            let is_multi_click = if let Some((last_time, last_char_idx)) = app.double_click_state {
+                                                now.duration_since(last_time).as_millis() < 400 && last_char_idx == char_idx
+                                            } else {
+                                                false
+                                            };
+                                            
+                                            if is_multi_click {
+                                                match app.last_click_type {
+                                                    ClickType::Single => {
+                                                        app.last_click_type = ClickType::Double;
+                                                        app.select_word_at(char_idx);
+                                                    }
+                                                    ClickType::Double => {
+                                                        app.last_click_type = ClickType::Triple;
+                                                        app.select_line_at(char_idx);
+                                                    }
+                                                    ClickType::Triple => {
+                                                        app.last_click_type = ClickType::Single;
+                                                        app.selection = Some((char_idx, char_idx));
+                                                    }
+                                                }
+                                            } else {
+                                                app.last_click_type = ClickType::Single;
+                                                app.selection = Some((char_idx, char_idx));
+                                            }
+                                            app.double_click_state = Some((now, char_idx));
+                                        }
+                                    }
+                                    crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                                        if app.is_selecting_mouse {
+                                            if let Some(char_idx) = app.map_coordinates_to_char_idx(mouse_event.column, mouse_event.row) {
+                                                if let Some((start, _)) = app.selection {
+                                                    app.selection = Some((start, char_idx));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                                        if app.is_selecting_mouse {
+                                            app.is_selecting_mouse = false;
+                                            if let Some(char_idx) = app.map_coordinates_to_char_idx(mouse_event.column, mouse_event.row) {
+                                                if let Some((start, _)) = app.selection {
+                                                    app.selection = Some((start, char_idx));
+                                                }
+                                            }
+                                            app.copy_selection();
+                                        }
+                                    }
+                                    crossterm::event::MouseEventKind::ScrollUp => {
+                                        let scroll_y = app.output_scroll_y(app.last_output_area.get().width, app.last_output_area.get().height);
+                                        app.scroll_offset = Some(scroll_y.saturating_sub(2));
+                                    }
+                                    crossterm::event::MouseEventKind::ScrollDown => {
+                                        let area = app.last_output_area.get();
+                                        let scroll_y = app.output_scroll_y(area.width, area.height);
+                                        let inner_width = area.width.saturating_sub(2);
+                                        let inner_height = area.height.saturating_sub(2);
+                                        let total_lines = Paragraph::new(app.output_text.as_str())
+                                            .wrap(Wrap { trim: false })
+                                            .line_count(inner_width)
+                                            .min(u16::MAX as usize) as u16;
+                                        let max_scroll = total_lines.saturating_sub(inner_height);
+                                        let next_scroll = scroll_y + 2;
+                                        if next_scroll >= max_scroll {
+                                            app.scroll_offset = None;
+                                        } else {
+                                            app.scroll_offset = Some(next_scroll);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            continue;
+                        }
+
                         let Event::Key(key) = event else {
                             continue;
                         };
-                        // Ignore key release/repeat so we don't double-insert on
-                        // terminals that emit Kitty/Windows keyboard events.
                         if key.kind != KeyEventKind::Press {
                             continue;
                         }
@@ -546,17 +1211,144 @@ pub async fn run_tui(
                             {
                                 app.copy_output();
                             }
-                            KeyCode::Char('v')
-                                if key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
-                            {
-                                app.paste_from_clipboard();
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if app.get_input_selection_range().is_some() {
+                                    if let Some((s, e)) = app.get_input_selection_range() {
+                                        let chars: Vec<char> = app.input.chars().collect();
+                                        let selected_text: String = chars[s..e].iter().collect();
+                                        write_clipboard(&selected_text, &mut app);
+                                        app.status = "copied input selection".into();
+                                    }
+                                }
+                                else if app.selection.is_some() {
+                                    app.copy_selection();
+                                }
+                                else if in_flight.is_some() {
+                                    if let Some(running) = in_flight.take() {
+                                        finish_inflight(
+                                            &mut app,
+                                            session,
+                                            store,
+                                            running,
+                                            true,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                else {
+                                    should_quit = true;
+                                }
+                            }
+                            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if let Some((s, e)) = app.get_input_selection_range() {
+                                    let chars: Vec<char> = app.input.chars().collect();
+                                    let selected_text: String = chars[s..e].iter().collect();
+                                    write_clipboard(&selected_text, &mut app);
+                                    app.delete_selected_input();
+                                    app.status = "cut input selection".into();
+                                }
                             }
                             KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 app.paste_from_clipboard();
                             }
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                should_quit = true;
+                            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.input_selection_start = Some(0);
+                                app.input_cursor_idx = app.input.chars().count();
+                            }
+                            KeyCode::Left => {
+                                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                                
+                                if shift {
+                                    if app.input_selection_start.is_none() {
+                                        app.input_selection_start = Some(app.input_cursor_idx);
+                                    }
+                                } else {
+                                    app.input_selection_start = None;
+                                }
+                                
+                                if ctrl {
+                                    let chars: Vec<char> = app.input.chars().collect();
+                                    while app.input_cursor_idx > 0 && app.input_cursor_idx <= chars.len() {
+                                        app.input_cursor_idx -= 1;
+                                        if app.input_cursor_idx == 0 || (chars[app.input_cursor_idx - 1] == ' ' && chars[app.input_cursor_idx] != ' ') { break; }
+                                            }
+                                } else {
+                                    app.input_cursor_idx = app.input_cursor_idx.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Right => {
+                                let chars_len = app.input.chars().count();
+                                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                                
+                                if shift {
+                                    if app.input_selection_start.is_none() {
+                                        app.input_selection_start = Some(app.input_cursor_idx);
+                                    }
+                                } else {
+                                    app.input_selection_start = None;
+                                }
+                                
+                                if ctrl {
+                                    let chars: Vec<char> = app.input.chars().collect();
+                                    while app.input_cursor_idx < chars_len {
+                                        app.input_cursor_idx += 1;
+                                        if app.input_cursor_idx == chars_len || (chars[app.input_cursor_idx] == ' ' && chars[app.input_cursor_idx - 1] != ' ') { break; }
+                                            }
+                                } else {
+                                    if app.input_cursor_idx < chars_len {
+                                        app.input_cursor_idx += 1;
+                                    }
+                                }
+                            }
+                            KeyCode::Home => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    if app.input_selection_start.is_none() {
+                                        app.input_selection_start = Some(app.input_cursor_idx);
+                                    }
+                                } else {
+                                    app.input_selection_start = None;
+                                }
+                                app.input_cursor_idx = 0;
+                            }
+                            KeyCode::End => {
+                                let chars_len = app.input.chars().count();
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    if app.input_selection_start.is_none() {
+                                        app.input_selection_start = Some(app.input_cursor_idx);
+                                    }
+                                } else {
+                                    app.input_selection_start = None;
+                                }
+                                app.input_cursor_idx = chars_len;
+                            }
+                            KeyCode::Backspace => {
+                                if !app.delete_selected_input() {
+                                    if app.input_cursor_idx > 0 {
+                                        let mut chars: Vec<char> = app.input.chars().collect();
+                                        chars.remove(app.input_cursor_idx - 1);
+                                        app.input_cursor_idx -= 1;
+                                        app.input = chars.into_iter().collect();
+                                    }
+                                }
+                            }
+                            KeyCode::Delete => {
+                                if !app.delete_selected_input() {
+                                    let chars_len = app.input.chars().count();
+                                    if app.input_cursor_idx < chars_len {
+                                        let mut chars: Vec<char> = app.input.chars().collect();
+                                        chars.remove(app.input_cursor_idx);
+                                        app.input = chars.into_iter().collect();
+                                    }
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                app.delete_selected_input();
+                                let mut chars: Vec<char> = app.input.chars().collect();
+                                chars.insert(app.input_cursor_idx, c);
+                                app.input_cursor_idx += 1;
+                                app.input = chars.into_iter().collect();
                             }
                             KeyCode::Tab => {
                                 if let Some(model) = app.cycle_model(
@@ -577,11 +1369,13 @@ pub async fn run_tui(
 
                                 let input = app.input.trim().to_string();
                                 app.input.clear();
+                                app.input_cursor_idx = 0;
+                                app.input_selection_start = None;
                                 if input.is_empty() {
                                     continue;
                                 }
 
-                                if input.starts_with('/') {
+                                if input.starts_with("/") {
                                     match handle_slash_command(
                                         &input,
                                         &mut app,
@@ -621,12 +1415,6 @@ pub async fn run_tui(
 
                                 in_flight = Some(InFlight { handle, rx });
                             }
-                            KeyCode::Char(c) => {
-                                app.input.push(c);
-                            }
-                            KeyCode::Backspace => {
-                                app.input.pop();
-                            }
                             KeyCode::Esc => {
                                 if in_flight.is_some() {
                                     if let Some(running) = in_flight.take() {
@@ -640,6 +1428,8 @@ pub async fn run_tui(
                                         .await;
                                     }
                                 } else {
+                                    app.selection = None;
+                                    app.input_selection_start = None;
                                     app.show_help = false;
                                     app.close_model_picker();
                                 }
@@ -656,7 +1446,6 @@ pub async fn run_tui(
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                // Tick: loop redraws and drains agent events above.
             }
         }
     }
@@ -665,12 +1454,14 @@ pub async fn run_tui(
         finish_inflight(&mut app, session, store, running, true).await;
     }
 
+    if current_mouse_state {
+        let _ = execute!(io::stdout(), crossterm::event::DisableMouseCapture);
+    }
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
-        LeaveAlternateScreen,
-        DisableMouseCapture
+        LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
     Ok(())
@@ -806,6 +1597,14 @@ async fn handle_slash_command(
                     Style::default().fg(Color::Blue),
                 );
             }
+        }
+        SlashCommand::ToggleMouse => {
+            app.mouse_enabled = !app.mouse_enabled;
+            let state = if app.mouse_enabled { "enabled" } else { "disabled" };
+            app.push_output(
+                &format!("✔ Mouse capture and app-owned text selection {}", state),
+                Style::default().fg(Color::Yellow),
+            );
         }
         SlashCommand::Quit => {
             return Ok(CommandOutcome::Quit);

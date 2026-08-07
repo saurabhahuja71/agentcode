@@ -26,15 +26,41 @@ impl Sandbox {
     }
 
     pub fn resolve_path(&self, path: &str) -> Result<PathBuf, SafetyError> {
-        let p = Path::new(path);
-        let resolved = if p.is_absolute() {
-            p.to_path_buf()
+        let path_expanded = if path.starts_with('~') {
+            if let Some(home) = dirs::home_dir() {
+                if path == "~" {
+                    home
+                } else if path.starts_with("~/") {
+                    home.join(&path[2..])
+                } else {
+                    Path::new(path).to_path_buf()
+                }
+            } else {
+                Path::new(path).to_path_buf()
+            }
         } else {
-            self.workspace.join(p)
+            Path::new(path).to_path_buf()
+        };
+
+        let resolved = if path_expanded.is_absolute() {
+            path_expanded
+        } else {
+            self.workspace.join(&path_expanded)
         };
         let canonical = resolved.canonicalize().unwrap_or(resolved);
 
-        if self.restrict_to_workspace && !canonical.starts_with(&self.workspace) {
+        let home = dirs::home_dir();
+        let is_allowed_global_path = if let Some(ref h) = home {
+            let canonical_home = h.canonicalize().unwrap_or_else(|_| h.clone());
+            let ssh_dir = canonical_home.join(".ssh");
+            let git_config = canonical_home.join(".gitconfig");
+            
+            canonical.starts_with(&ssh_dir) || canonical == git_config
+        } else {
+            false
+        };
+
+        if self.restrict_to_workspace && !canonical.starts_with(&self.workspace) && !is_allowed_global_path {
             return Err(SafetyError::PathEscape(canonical.display().to_string()));
         }
         Ok(canonical)

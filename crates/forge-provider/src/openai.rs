@@ -37,6 +37,17 @@ impl OpenAiCompatibleProvider {
             client,
         }
     }
+
+    fn endpoint_url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else if base.ends_with("/v1") {
+            format!("{base}/chat/completions")
+        } else {
+            format!("{base}/v1/chat/completions")
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -78,12 +89,14 @@ struct ApiUsage {
 
 #[derive(Deserialize)]
 struct StreamChunk {
+    #[serde(default)]
     choices: Vec<StreamChoice>,
     usage: Option<ApiUsage>,
 }
 
 #[derive(Deserialize)]
 struct StreamChoice {
+    #[serde(default)]
     delta: StreamDelta,
     finish_reason: Option<String>,
 }
@@ -96,6 +109,7 @@ struct StreamDelta {
 
 #[derive(Deserialize)]
 struct StreamToolCallDelta {
+    #[serde(default)]
     index: usize,
     id: Option<String>,
     function: Option<StreamFunctionDelta>,
@@ -118,7 +132,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = self.endpoint_url();
         let body = ApiChatRequest {
             model: &request.model,
             messages: &request.messages,
@@ -180,7 +194,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
     }
 
     async fn chat_stream(&self, request: ChatRequest) -> Result<BoxStream<StreamEvent>, ProviderError> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = self.endpoint_url();
         let body = ApiChatRequest {
             model: &request.model,
             messages: &request.messages,

@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 arboard.workspace = true
+base64 = "0.22"
 crossterm.workspace = true
 forge-config = { workspace = true }
 forge-core = { workspace = true }
@@ -14,6 +15,7 @@ forge-ssh = { workspace = true }
 forge-tool = { workspace = true }
 futures.workspace = true
 ratatui.workspace = true
+regex = "1"
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
