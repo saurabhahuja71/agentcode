@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use forge_provider::Message;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,9 +12,33 @@ pub struct Session {
     pub workspace: PathBuf,
     pub model: String,
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub todos: Vec<TodoItem>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub total_tokens: u64,
+}
+
+/// A tracked task item. Managed by the agent through the `todo` tool and by
+/// the user through the TUI side panel; persisted with the session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl TodoItem {
+    pub fn new(text: String) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            text,
+            done: false,
+            created_at: Utc::now(),
+        }
+    }
 }
 
 impl Session {
@@ -26,6 +50,7 @@ impl Session {
             workspace,
             model,
             messages: Vec::new(),
+            todos: Vec::new(),
             created_at: now,
             updated_at: now,
             total_tokens: 0,

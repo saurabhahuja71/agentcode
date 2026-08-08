@@ -92,6 +92,9 @@ impl ToolRegistry {
             )));
         }
 
+        registry.register(Arc::new(super::interactive::TodoTool::new()));
+        registry.register(Arc::new(super::interactive::AskOptionsTool::new()));
+
         registry
     }
 

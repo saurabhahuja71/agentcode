@@ -4,9 +4,12 @@ pub enum SlashCommand {
     Model(Option<String>),
     Tools,
     Clear,
+    New,
+    Compact,
     Debug,
     Parallel(Vec<String>),
     Ssh(Vec<String>),
+    Todo(Vec<String>),
     Resume,
     Skills,
     Quit,
@@ -31,6 +34,8 @@ impl SlashCommand {
             "model" => SlashCommand::Model(parts.get(1).map(|s| s.to_string())),
             "tools" => SlashCommand::Tools,
             "clear" => SlashCommand::Clear,
+            "new" => SlashCommand::New,
+            "compact" => SlashCommand::Compact,
             "debug" => SlashCommand::Debug,
             "parallel" => {
                 let tasks: Vec<String> = if parts.len() > 1 {
@@ -46,6 +51,9 @@ impl SlashCommand {
                 SlashCommand::Parallel(tasks)
             }
             "ssh" => SlashCommand::Ssh(parts[1..].iter().map(|s| s.to_string()).collect()),
+            "todo" | "todos" => {
+                SlashCommand::Todo(parts[1..].iter().map(|s| s.to_string()).collect())
+            }
             "resume" => SlashCommand::Resume,
             "skills" => SlashCommand::Skills,
             "toggle-mouse" | "mouse" => SlashCommand::ToggleMouse,

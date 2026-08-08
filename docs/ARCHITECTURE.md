@@ -89,10 +89,17 @@ flowchart TB
 | Feature | Status | Notes |
 |---------|--------|-------|
 | ratatui TUI | ✅ Done | `forge-tui` |
-| Slash commands | ✅ Done | `/help`, `/model`, `/tools`, `/ssh`, `/parallel`, `/debug`, `/clear`, `/resume`, `/skills` |
+| Slash commands | ✅ Done | `/help`, `/model`, `/tools`, `/new`, `/compact`, `/todo`, `/ssh`, `/parallel`, `/debug`, `/clear`, `/resume`, `/skills`, `/toggle-mouse` |
 | Session history + resume | ✅ Done | `~/.forge/sessions/` |
 | Streaming output | ✅ Done | Real-time content + tool feedback |
 | Context summarization | ✅ Done | Token threshold trigger |
+| Tool approvals | ✅ Done | `ApprovalGate` y/n prompt for destructive tools |
+| Reasoning/thought blocks | ✅ Done | `reasoning_content` -> `Thinking*` events -> timed `💭 Thought` blocks |
+| Options picker | ✅ Done | `ask_options` tool -> `OptionsRequest` -> numbered picker (↑/↓+Enter+mouse, custom answer) |
+| Todo side panel | ✅ Done | `todo` tool + `TodoUpdate` snapshots; Ctrl+T focus, Space toggle, `[`/`]` resize, persisted in session |
+| Rich status bar | ✅ Done | spinner, tokens + context %, permission mode |
+| Text selection/copy | ✅ Done | mouse drag, double/triple click, Ctrl+Shift+C, Ctrl+X/V |
+| Multi-pane layout | ✅ Done | output + resizable side panel + input + status bar |
 
 ### 3. Coding Capabilities
 
@@ -177,10 +184,22 @@ flowchart TB
 
 1. User message appended; context summarized if over threshold
 2. LLM called with tool definitions (streaming)
-3. **All tool calls in a turn execute concurrently** via `tokio::spawn`
-4. Pre/post hooks fire around each tool execution
-5. Tool results fed back; loop until no tool calls or max turns
-6. Session auto-saved
+3. Reasoning stream (`reasoning_content`) emitted as `Thinking`/`ThinkingDelta`/`ThinkingEnd` events
+4. **All tool calls in a turn execute concurrently** via `tokio::spawn`
+5. `todo` and `ask_options` calls are intercepted and handled interactively: todo ops mutate the session and emit `TodoUpdate` snapshots; `ask_options` emits `OptionsRequest` and blocks on the TUI's options channel
+6. Pre/post hooks fire around each tool execution
+7. Tool results fed back; loop until no tool calls or max turns
+8. Session auto-saved
+
+## Interactivity model
+
+The agent loop never blocks on the TTY. Interactive gates are injected per turn via `Interactivity`:
+
+- `ApprovalGate` — carries an `UnboundedReceiver<bool>`; `ask()` emits `ApprovalRequest` and waits for y/n.
+- `OptionsGate` — carries an `UnboundedReceiver<String>`; `ask()` emits `OptionsRequest` and waits for a choice (or `None` when dismissed).
+- Headless callers (`forge exec`, `forge-parallel`) pass `Interactivity::none()`; both gates immediately return and the tools fall back to non-blocking messages.
+
+Events (`forge-core/events.rs`) are serializable and drive both the TUI and headless consumers.
 
 ## Step-by-Step Implementation Plan (remaining)
 

@@ -3,7 +3,7 @@ mod debug;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use forge_config::ForgeConfig;
-use forge_core::{Agent, Session, SessionStore};
+use forge_core::{Agent, Interactivity, Session, SessionStore};
 use forge_mcp::register_mcp_tools;
 use forge_parallel::ParallelExecutor;
 use forge_safety::{AuditLogger, Sandbox, WorkspaceTrust};
@@ -237,7 +237,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Exec { prompt, format }) => {
             let mut session = Session::new(workspace, agent.model());
-            agent.run_turn(&mut session, prompt, None).await?;
+            agent.run_turn(&mut session, prompt, None, Interactivity::none()).await?;
             if config.session.auto_save {
                 store.save(&session)?;
             }

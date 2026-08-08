@@ -104,6 +104,8 @@ struct StreamChoice {
 #[derive(Deserialize, Default)]
 struct StreamDelta {
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<StreamToolCallDelta>>,
 }
 
@@ -257,6 +259,11 @@ fn parse_sse_event(
                     });
                     let mut out = Vec::new();
                     if let Some(choice) = chunk.choices.into_iter().next() {
+                        if let Some(reasoning) = choice.delta.reasoning_content {
+                            if !reasoning.is_empty() {
+                                out.push(StreamEvent::ReasoningDelta(reasoning));
+                            }
+                        }
                         if let Some(content) = choice.delta.content {
                             if !content.is_empty() {
                                 out.push(StreamEvent::ContentDelta(content));

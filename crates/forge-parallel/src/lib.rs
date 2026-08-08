@@ -1,5 +1,5 @@
 use anyhow::Result;
-use forge_core::{Agent, AgentEvent, Session};
+use forge_core::{Agent, AgentEvent, Interactivity, Session};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -105,7 +105,7 @@ impl ParallelExecutor {
                 let desc = description.clone();
 
                 let run_handle = tokio::spawn(async move {
-                    agent_clone.run_turn(&mut session, desc, Some(tx)).await
+                    agent_clone.run_turn(&mut session, desc, Some(tx), Interactivity::none()).await
                 });
 
                 let mut output = String::new();
@@ -161,7 +161,7 @@ impl ParallelExecutor {
 
         let mut session = Session::new(self.workspace.clone(), self.model.clone());
         self.agent
-            .run_turn(&mut session, prompt, None)
+            .run_turn(&mut session, prompt, None, Interactivity::none())
             .await?;
 
         let last_assistant = session

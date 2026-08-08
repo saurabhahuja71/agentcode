@@ -5,14 +5,151 @@ use crate::summarize::{estimate_tokens, summarize_messages};
 use anyhow::Result;
 use forge_config::ForgeConfig;
 use forge_provider::{
-    ChatRequest, FunctionCall, LlmProvider, Message, ProviderRouter, StreamEvent, ToolCall,
+    ChatRequest, FunctionCall, LlmProvider, Message, ProviderError, ProviderRouter, StreamEvent,
+    ToolCall,
 };
 use forge_tool::ToolRegistry;
 use futures::StreamExt;
 use parking_lot::RwLock;
 use serde_json::Value;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+const MAX_RETRIES: u32 = 3;
+
+/// Transient provider failures worth retrying: network errors, 429 rate
+/// limits, 5xx server errors, and common "try again" messages.
+fn is_retriable(err: &ProviderError) -> bool {
+    match err {
+        ProviderError::Http(_) => true,
+        ProviderError::Api(msg) => {
+            let lower = msg.to_lowercase();
+            ["429", "500", "502", "503", "504", "529"]
+                .iter()
+                .any(|code| lower.contains(code))
+                || lower.contains("timeout")
+                || lower.contains("temporarily")
+                || lower.contains("overloaded")
+                || lower.contains("too many requests")
+                || lower.contains("unavailable")
+        }
+        _ => false,
+    }
+}
+
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_millis(500 * (1u64 << attempt.min(4)))
+}
+
+/// Interactive checkpoint for approving destructive tool calls. When no
+/// receiver is wired up (headless mode), every request is allowed through;
+/// the sandbox allow-list and destructive-command checks still apply.
+#[derive(Clone, Debug, Default)]
+pub struct ApprovalGate {
+    inner: Option<Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<bool>>>>,
+}
+
+impl ApprovalGate {
+    /// Build a live gate backed by the given response channel.
+    pub fn new(rx: mpsc::UnboundedReceiver<bool>) -> Self {
+        Self {
+            inner: Some(Arc::new(tokio::sync::Mutex::new(rx))),
+        }
+    }
+
+    /// Headless gate: never blocks, always approves.
+    pub fn none() -> Self {
+        Self { inner: None }
+    }
+
+    /// Whether this gate is interactive (has a live response channel).
+    pub fn is_interactive(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    /// Emit an `ApprovalRequest` event, then block until the operator answers.
+    /// Returns `true` when the call may proceed.
+    pub async fn ask(
+        &self,
+        tool_name: &str,
+        arguments: &str,
+        emit: &impl Fn(AgentEvent),
+    ) -> bool {
+        let Some(rx) = &self.inner else {
+            return true;
+        };
+        emit(AgentEvent::ApprovalRequest {
+            tool_name: tool_name.to_string(),
+            arguments: arguments.to_string(),
+        });
+        rx.lock().await.recv().await.unwrap_or(false)
+    }
+}
+
+/// Channel-backed interactive multiple-choice prompt. When no receiver is
+/// wired up (headless mode), `ask` returns `None` so callers can degrade
+/// gracefully instead of blocking forever.
+#[derive(Clone, Debug, Default)]
+pub struct OptionsGate {
+    inner: Option<Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<String>>>>,
+}
+
+impl OptionsGate {
+    /// Build a live gate backed by the given response channel.
+    pub fn new(rx: mpsc::UnboundedReceiver<String>) -> Self {
+        Self {
+            inner: Some(Arc::new(tokio::sync::Mutex::new(rx))),
+        }
+    }
+
+    /// Headless gate: never blocks, always yields `None`.
+    pub fn none() -> Self {
+        Self { inner: None }
+    }
+
+    /// Emit an `OptionsRequest` event, then block until the user answers.
+    /// Returns the chosen text (selected option or typed answer), or `None`
+    /// when the prompt was dismissed.
+    pub async fn ask(
+        &self,
+        prompt: &str,
+        options: &[String],
+        emit: &impl Fn(AgentEvent),
+    ) -> Option<String> {
+        let Some(rx) = &self.inner else {
+            return None;
+        };
+        emit(AgentEvent::OptionsRequest {
+            prompt: prompt.to_string(),
+            options: options.to_vec(),
+        });
+        rx.lock().await.recv().await
+    }
+}
+
+/// Bundle of interactive UI channels handed to `run_turn`.
+#[derive(Clone, Debug)]
+pub struct Interactivity {
+    pub approval: ApprovalGate,
+    pub options: OptionsGate,
+}
+
+impl Interactivity {
+    /// Headless: no interactive approval, no option prompts.
+    pub fn none() -> Self {
+        Self {
+            approval: ApprovalGate::none(),
+            options: OptionsGate::none(),
+        }
+    }
+
+    /// Fully interactive: approval + options wired to the UI.
+    pub fn new(approval: ApprovalGate, options: OptionsGate) -> Self {
+        Self { approval, options }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RuntimeAgentConfig {
@@ -23,6 +160,9 @@ pub struct RuntimeAgentConfig {
     pub system_prompt: String,
     pub stream: bool,
     pub summarize_threshold: usize,
+    pub context_window: usize,
+    /// When true, destructive shell commands never require interactive approval.
+    pub full_auto: bool,
 }
 
 impl From<&ForgeConfig> for RuntimeAgentConfig {
@@ -35,6 +175,8 @@ impl From<&ForgeConfig> for RuntimeAgentConfig {
             system_prompt: config.agent.system_prompt.clone(),
             stream: true,
             summarize_threshold: config.session.summarize_threshold,
+            context_window: config.session.context_window,
+            full_auto: config.agent.full_auto,
         }
     }
 }
@@ -77,6 +219,20 @@ impl Agent {
         self.config.read().model.clone()
     }
 
+    /// Name of the provider that would serve the current model (for the status bar).
+    pub fn provider_name(&self) -> String {
+        let model = self.model();
+        self.provider.provider_name_for_model(&model)
+    }
+
+    pub fn full_auto(&self) -> bool {
+        self.config.read().full_auto
+    }
+
+    pub fn context_window(&self) -> usize {
+        self.config.read().context_window
+    }
+
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.names()
     }
@@ -86,6 +242,7 @@ impl Agent {
         session: &mut Session,
         user_message: String,
         event_tx: Option<mpsc::UnboundedSender<AgentEvent>>,
+        interactivity: Interactivity,
     ) -> Result<()> {
         let emit = |event: AgentEvent| {
             if let Some(tx) = &event_tx {
@@ -133,7 +290,7 @@ impl Agent {
             let response = if cfg.stream {
                 self.run_streaming(&request, &emit).await?
             } else {
-                self.provider.chat(request).await.map_err(|e| anyhow::anyhow!(e))?
+                self.chat_with_retry(&request, &emit).await?
             };
 
             session.total_tokens += response.usage.total_tokens as u64;
@@ -163,11 +320,18 @@ impl Agent {
                 }
             };
 
-            let tool_results = self.execute_tools_concurrent(&calls, &emit).await;
-            for (call_id, output) in tool_results {
+            let tool_results = self
+                .execute_tools_concurrent(&calls, &emit, &interactivity, session)
+                .await;
+            for (call_id, output, is_error) in tool_results {
+                let content = if is_error {
+                    format!("[tool_error]\n{output}")
+                } else {
+                    output
+                };
                 session.messages.push(Message::Tool {
                     tool_call_id: call_id,
-                    content: output,
+                    content,
                 });
             }
 
@@ -187,17 +351,163 @@ impl Agent {
         Ok(())
     }
 
+    /// Replace older messages with an LLM-generated summary, keeping recent context.
+    /// Returns the summary text, or `None` when the conversation is too short to compact.
+    pub async fn compact(&self, session: &mut Session) -> Result<Option<String>> {
+        const KEEP_RECENT: usize = 10;
+        if session.messages.len() <= KEEP_RECENT + 1 {
+            return Ok(None);
+        }
+
+        let cfg = self.config.read().clone();
+
+        // Walk the split back until `older` ends on a non-tool message so the
+        // summarization request is always well-formed (no orphan tool results).
+        let mut split = session.messages.len().saturating_sub(KEEP_RECENT);
+        while split > 0 && matches!(session.messages.get(split - 1), Some(Message::Tool { .. })) {
+            split -= 1;
+        }
+
+        let older = session.messages[..split].to_vec();
+        let recent = session.messages[split..].to_vec();
+
+        // Preserve the leading system prompt; summarize everything after it.
+        let (prefix, to_summarize) = match older.split_first() {
+            Some((Message::System { .. }, rest)) => (older[..1].to_vec(), rest.to_vec()),
+            _ => (Vec::new(), older.clone()),
+        };
+        if to_summarize.is_empty() {
+            return Ok(None);
+        }
+
+        let summary = match self.summarize_with_llm(&to_summarize, &cfg).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "LLM compact failed; falling back to truncation");
+                summarize_messages(&to_summarize, 0)
+                    .into_iter()
+                    .find_map(|m| match m {
+                        Message::System { content } => Some(content),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "[summary unavailable]".into())
+            }
+        };
+
+        session.messages = prefix;
+        session.messages.push(Message::System {
+            content: format!("Summary of earlier conversation:\n{summary}"),
+        });
+        session.messages.extend(recent);
+        session.touch();
+        Ok(Some(summary))
+    }
+
+    async fn summarize_with_llm(
+        &self,
+        messages: &[Message],
+        cfg: &RuntimeAgentConfig,
+    ) -> Result<String> {
+        let mut req_messages = messages.to_vec();
+        req_messages.push(Message::User {
+            content: "Summarize the conversation above for a follow-up task. \
+                      Keep: goals, decisions, file paths, error states, and unfinished work. \
+                      Output only the summary."
+                .into(),
+        });
+        let request = ChatRequest {
+            model: cfg.model.clone(),
+            messages: req_messages,
+            tools: vec![],
+            temperature: 0.2,
+            max_tokens: 2000,
+            stream: false,
+        };
+        let resp = self
+            .provider
+            .chat(request)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        match resp.message {
+            Message::Assistant {
+                content: Some(c), ..
+            } if !c.is_empty() => Ok(c),
+            _ => Err(anyhow::anyhow!("summarization returned empty response")),
+        }
+    }
+
+    /// Shell commands that deserve a human checkpoint before running.
+    fn requires_approval(&self, call: &ToolCall) -> bool {
+        if call.function.name != "shell" {
+            return false;
+        }
+        let args: Value =
+            serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+        let command = args["command"].as_str().unwrap_or("");
+        is_destructive_command(command)
+    }
+
     async fn execute_tools_concurrent(
         &self,
         calls: &[ToolCall],
         emit: &impl Fn(AgentEvent),
-    ) -> Vec<(String, String)> {
+        interactivity: &Interactivity,
+        session: &mut Session,
+    ) -> Vec<(String, String, bool)> {
         let mut handles = Vec::with_capacity(calls.len());
+        let mut results = Vec::with_capacity(calls.len());
 
         for call in calls {
             let name = call.function.name.clone();
             let args_str = call.function.arguments.clone();
             let call_id = call.id.clone();
+
+            // Interactive tools are handled inline (they may block on the UI).
+            if name == "ask_options" {
+                let outcome =
+                    self.execute_options_call(call, &args_str, emit, &interactivity.options)
+                        .await;
+                let output = outcome.0;
+                let is_error = outcome.1;
+                emit(AgentEvent::ToolCallEnd {
+                    name: name.clone(),
+                    output: output.clone(),
+                    is_error,
+                });
+                results.push((call_id, output, is_error));
+                continue;
+            }
+            if name == "todo" {
+                emit(AgentEvent::ToolCallStart {
+                    name: name.clone(),
+                    arguments: args_str.clone(),
+                });
+                let output = self.execute_todo_call(call, emit, session).await;
+                emit(AgentEvent::ToolCallEnd {
+                    name: name.clone(),
+                    output: output.clone(),
+                    is_error: false,
+                });
+                results.push((call_id, output, false));
+                continue;
+            }
+
+            if self.requires_approval(call) {
+                let allowed = interactivity.approval.ask(&name, &args_str, emit).await;
+
+                if !allowed {
+                    let output =
+                        "Command was not approved by the user; execution skipped.".to_string();
+                    emit(AgentEvent::ToolCallEnd {
+                        name,
+                        output: output.clone(),
+                        is_error: true,
+                    });
+                    results.push((call_id, output, true));
+                    continue;
+                }
+            }
+
             emit(AgentEvent::ToolCallStart {
                 name: name.clone(),
                 arguments: args_str.clone(),
@@ -226,7 +536,6 @@ impl Agent {
             }));
         }
 
-        let mut results = Vec::with_capacity(handles.len());
         for handle in handles {
             match handle.await {
                 Ok((call_id, name, output, is_error)) => {
@@ -235,7 +544,7 @@ impl Agent {
                         output: output.clone(),
                         is_error,
                     });
-                    results.push((call_id, output));
+                    results.push((call_id, output, is_error));
                 }
                 Err(e) => {
                     emit(AgentEvent::Error {
@@ -247,23 +556,200 @@ impl Agent {
         results
     }
 
+    /// Interactive `ask_options` tool call: emit an `OptionsRequest`, wait for
+    /// the user's choice, and return it as the tool result.
+    async fn execute_options_call(
+        &self,
+        call: &ToolCall,
+        args_str: &str,
+        emit: &impl Fn(AgentEvent),
+        options: &OptionsGate,
+    ) -> (String, bool) {
+        emit(AgentEvent::ToolCallStart {
+            name: call.function.name.clone(),
+            arguments: args_str.to_string(),
+        });
+
+        let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
+        let prompt = args["prompt"].as_str().unwrap_or("Choose an option").to_string();
+        let options_list: Vec<String> = args["options"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| o.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if options_list.is_empty() {
+            return ("[ask_options] no options provided".to_string(), true);
+        }
+
+        match options.ask(&prompt, &options_list, emit).await {
+            Some(choice) => (choice, false),
+            None => (
+                "[ask_options] prompt dismissed; pick one yourself".to_string(),
+                false,
+            ),
+        }
+    }
+
+    /// Interactive `todo` tool call: apply the operation to `session.todos`,
+    /// emit a `TodoUpdate` snapshot, and return a short confirmation.
+    async fn execute_todo_call(
+        &self,
+        call: &ToolCall,
+        emit: &impl Fn(AgentEvent),
+        session: &mut Session,
+    ) -> String {
+        let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+        let op = args["op"].as_str().unwrap_or("add").to_string();
+        let text = args["text"].as_str().unwrap_or("").trim().to_string();
+        let id = args["id"].as_str().unwrap_or("").to_string();
+
+        let summary = match op.as_str() {
+            "add" if !text.is_empty() => {
+                let item = crate::session::TodoItem::new(text.clone());
+                session.todos.push(item);
+                format!("todo added: {text}")
+            }
+            "complete" | "done" => {
+                if let Some(item) = session.todos.iter_mut().find(|t| t.id == id) {
+                    item.done = true;
+                    format!("todo completed: {}", item.text)
+                } else {
+                    "todo not found".to_string()
+                }
+            }
+            "reopen" => {
+                if let Some(item) = session.todos.iter_mut().find(|t| t.id == id) {
+                    item.done = false;
+                    format!("todo reopened: {}", item.text)
+                } else {
+                    "todo not found".to_string()
+                }
+            }
+            "remove" | "delete" => {
+                let before = session.todos.len();
+                session.todos.retain(|t| t.id != id);
+                if session.todos.len() < before {
+                    "todo removed".to_string()
+                } else {
+                    "todo not found".to_string()
+                }
+            }
+            "update" => {
+                let new_text = args["new_text"].as_str().unwrap_or("").trim();
+                if let Some(item) = session.todos.iter_mut().find(|t| t.id == id) {
+                    if !new_text.is_empty() {
+                        item.text = new_text.to_string();
+                        format!("todo updated: {new_text}")
+                    } else {
+                        "todo update needs new_text".to_string()
+                    }
+                } else {
+                    "todo not found".to_string()
+                }
+            }
+            "clear" => {
+                let count = session.todos.len();
+                session.todos.clear();
+                format!("cleared {count} todos")
+            }
+            "list" => {
+                if session.todos.is_empty() {
+                    "no todos".to_string()
+                } else {
+                    let lines: Vec<String> = session
+                        .todos
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| {
+                            format!(
+                                "{}. {} {}",
+                                i + 1,
+                                if t.done { "[x]" } else { "[ ]" },
+                                t.text
+                            )
+                        })
+                        .collect();
+                    format!("todos:\n{}", lines.join("\n"))
+                }
+            }
+            other => format!("todo: unknown op '{other}' (add|complete|reopen|remove|update|clear|list)"),
+        };
+
+        emit(AgentEvent::TodoUpdate {
+            items: session.todos.clone(),
+        });
+        summary
+    }
+
+    async fn chat_with_retry(
+        &self,
+        request: &ChatRequest,
+        emit: &impl Fn(AgentEvent),
+    ) -> Result<forge_provider::ChatResponse> {
+        for attempt in 0..MAX_RETRIES {
+            match self.provider.chat(request.clone()).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) if is_retriable(&e) && attempt + 1 < MAX_RETRIES => {
+                    emit(AgentEvent::Retrying {
+                        attempt: attempt + 1,
+                        error: e.to_string(),
+                    });
+                    tokio::time::sleep(backoff(attempt)).await;
+                }
+                Err(e) => return Err(anyhow::anyhow!(e)),
+            }
+        }
+        Err(anyhow::anyhow!("provider call failed after retries"))
+    }
+
     async fn run_streaming(
         &self,
         request: &ChatRequest,
         emit: &impl Fn(AgentEvent),
     ) -> Result<forge_provider::ChatResponse> {
-        let mut stream = self
-            .provider
-            .chat_stream(request.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let mut stream = None;
+        for attempt in 0..MAX_RETRIES {
+            match self.provider.chat_stream(request.clone()).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) if is_retriable(&e) && attempt + 1 < MAX_RETRIES => {
+                    emit(AgentEvent::Retrying {
+                        attempt: attempt + 1,
+                        error: e.to_string(),
+                    });
+                    tokio::time::sleep(backoff(attempt)).await;
+                }
+                Err(e) => return Err(anyhow::anyhow!(e)),
+            }
+        }
+        let mut stream = stream.ok_or_else(|| anyhow::anyhow!("provider stream unavailable"))?;
 
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut thinking = false;
 
         while let Some(event) = stream.next().await {
             match event {
+                StreamEvent::ReasoningDelta(delta) => {
+                    if !delta.is_empty() {
+                        if !thinking {
+                            thinking = true;
+                            emit(AgentEvent::Thinking);
+                        }
+                        emit(AgentEvent::ThinkingDelta { text: delta });
+                    }
+                }
                 StreamEvent::ContentDelta(delta) => {
+                    if thinking {
+                        thinking = false;
+                        emit(AgentEvent::ThinkingEnd);
+                    }
                     if !delta.is_empty() {
                         content.push_str(&delta);
                         emit(AgentEvent::ContentDelta { text: delta });
@@ -297,8 +783,15 @@ impl Agent {
                         .push_str(&arguments_delta);
                 }
                 StreamEvent::Done(resp) => {
+                    if thinking {
+                        emit(AgentEvent::ThinkingEnd);
+                    }
                     let mut final_tool_calls = if tool_calls.is_empty() {
-                        if let Message::Assistant { tool_calls: Some(ref tc), .. } = resp.message {
+                        if let Message::Assistant {
+                            tool_calls: Some(ref tc),
+                            ..
+                        } = resp.message
+                        {
                             tc.clone()
                         } else {
                             Vec::new()
@@ -365,4 +858,27 @@ impl Agent {
             usage: forge_provider::TokenUsage::default(),
         })
     }
+}
+
+/// Whether a shell command is destructive enough to warrant a confirmation.
+fn is_destructive_command(command: &str) -> bool {
+    let first = command.split_whitespace().next().unwrap_or("");
+    let base = Path::new(first)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(first);
+    match base {
+        "rm" | "dd" | "mkfs" | "mkfs.ext4" | "mkfs.xfs" | "shutdown" | "reboot" | "halt"
+        | "poweroff" | "sudo" | "kill" | "killall" | "pkill" => return true,
+        _ => {}
+    }
+    let lower = command.to_lowercase();
+    lower.contains("git reset --hard")
+        || lower.contains("git clean -f")
+        || lower.contains("git push --force")
+        || lower.contains("git checkout --")
+        || lower.contains("drop table")
+        || lower.contains("truncate ")
+        || lower.contains("chmod 777")
+        || lower.contains("> /dev/sd")
 }

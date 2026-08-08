@@ -92,6 +92,8 @@ pub struct ChatResponse {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     ContentDelta(String),
+    /// Model-internal reasoning/thinking text (e.g. `reasoning_content`).
+    ReasoningDelta(String),
     ToolCallDelta { index: usize, id: Option<String>, name: Option<String>, arguments_delta: String },
     Done(ChatResponse),
     Error(String),
@@ -113,6 +115,17 @@ pub enum ProviderError {
 pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
     fn supports_model(&self, model: &str) -> bool;
+
+    /// Human-readable name of the provider that would serve `model`.
+    /// Defaults to this provider's name when it supports the model.
+    fn provider_name_for_model(&self, model: &str) -> String {
+        if self.supports_model(model) {
+            self.name().to_string()
+        } else {
+            "unknown".into()
+        }
+    }
+
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError>;
     async fn chat_stream(&self, request: ChatRequest) -> Result<BoxStream<StreamEvent>, ProviderError>;
 }

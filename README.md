@@ -147,6 +147,9 @@ Set `OPENAI_API_KEY` in your environment. Providers are tried in priority order 
 | `/model [name]` | Show or set model |
 | `/tools` | List available tools |
 | `/clear` | Clear output pane |
+| `/new` | Start a fresh session |
+| `/compact` | Drop oldest messages when the session is long |
+| `/todo` | Toggle the todo panel (`/todo add <task>`, `/todo clear`) |
 | `/resume` | Resume last session |
 | `/ssh list` | List SSH hosts |
 | `/ssh connect <alias>` | Connect to host |
@@ -154,6 +157,19 @@ Set `OPENAI_API_KEY` in your environment. Providers are tried in priority order 
 | `/parallel task1; task2` | Queue parallel tasks |
 | `/debug` | Debug mode info |
 | `/skills` | List loaded skills |
+| `/toggle-mouse` | Enable/disable mouse capture + text selection |
+
+## TUI features
+
+- **Streaming transcript** with word-wrap, mouse wheel scrolling, and click-to-expand/collapse tool cards (long outputs are auto-folded).
+- **Text selection & copy:** drag with the mouse to select, `Ctrl+Shift+C` / `Ctrl+C` copies; double/triple click selects word/line. `Ctrl+X` cuts the input selection, `Ctrl+V` pastes.
+- **Multiline input:** `Shift+Enter` inserts a newline, `↑/↓` recall history, `Ctrl+A` selects all in the input.
+- **Tool approvals:** destructive tools ask before running — the input area becomes a `y`/`n` prompt (`Esc` denies, `Ctrl+C` cancels the turn).
+- **Reasoning display:** providers that stream `reasoning_content` render a timed `💭 Thought: 14.3s` block with the model's reasoning, collapsed by default.
+- **Options picker:** when the agent calls `ask_options`, a numbered picker appears (`↑/↓` + `Enter`, or click); typing a printable character switches to a custom answer, `Esc` dismisses.
+- **Todo side panel:** live task list on the right. `Ctrl+T` opens/focuses/closes it, `Space` toggles an item, `d` deletes, `[`/`]` resize while focused, mouse clicks toggle. Todos persist with the session and sync with the agent's `todo` tool.
+- **Rich status bar:** spinner, live token count + context usage %, and permission mode (`ask`/`allow`).
+- **Focus management:** the todo panel can hold keyboard focus (`Tab`/`Esc` returns to input); the input stays reachable at all times.
 
 ## CLI reference
 
@@ -201,6 +217,8 @@ forge init                     # Create ~/.forge/config.toml
 | `git_commit` | Stage all and commit with message |
 | `code_outline` | Extract functions/structs/classes from source files |
 | `read_skill` | Load a skill workflow by name |
+| `todo` | Add/complete/reopen/remove tasks (live session todo list) |
+| `ask_options` | Ask the user to pick from a list of options (TUI picker) |
 | `remote_exec` | Run command on SSH host (when configured) |
 | `remote_read_file` | Read file from SSH host |
 | `remote_list_dir` | List directory on SSH host |

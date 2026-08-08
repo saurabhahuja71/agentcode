@@ -31,6 +31,13 @@ impl ProviderRouter {
     pub fn list_providers(&self) -> Vec<String> {
         self.providers.iter().map(|p| p.name().to_string()).collect()
     }
+
+    /// Name of the provider configured to serve `model`, or "unknown".
+    pub fn provider_for_model(&self, model: &str) -> String {
+        self.find_provider(model)
+            .map(|p| p.name().to_string())
+            .unwrap_or_else(|| "unknown".into())
+    }
 }
 
 fn build_provider(config: &ProviderConfig) -> Option<Arc<dyn LlmProvider>> {
@@ -66,6 +73,10 @@ impl LlmProvider for ProviderRouter {
 
     fn supports_model(&self, model: &str) -> bool {
         self.find_provider(model).is_some()
+    }
+
+    fn provider_name_for_model(&self, model: &str) -> String {
+        self.provider_for_model(model)
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
