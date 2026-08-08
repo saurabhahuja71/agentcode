@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod events;
 pub mod hooks;
+pub mod pricing;
 pub mod session;
 pub mod summarize;
 

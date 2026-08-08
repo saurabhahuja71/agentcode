@@ -34,6 +34,9 @@ pub struct AgentConfig {
     pub max_turns: u32,
     #[serde(default)]
     pub full_auto: bool,
+    /// "ask" (confirm destructive tools) | "allow" | "plan" (propose, never execute).
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,6 +328,7 @@ impl Default for AgentConfig {
             system_prompt: default_system_prompt(),
             max_turns: default_max_turns(),
             full_auto: false,
+            permission_mode: None,
         }
     }
 }

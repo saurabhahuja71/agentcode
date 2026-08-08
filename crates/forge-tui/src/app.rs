@@ -1,4 +1,5 @@
 use anyhow::Result;
+use crate::theme::THEME;
 use forge_core::{
     Agent, AgentEvent, ApprovalGate, Interactivity, OptionsGate, Session, SessionStore, TodoItem,
 };
@@ -43,6 +44,187 @@ fn format_number(n: u64) -> String {
     out
 }
 
+/// Selection-aware span push: splits `text` into selected/unselected segments
+/// so copy ranges stay byte-accurate while styling differs.
+fn push_segment(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    fg: Color,
+    bg: Option<Color>,
+    modifier: Modifier,
+    abs_start: usize,
+    sel_start: usize,
+    sel_end: usize,
+) {
+    let abs_end = abs_start + text.len();
+    let has_selection = sel_start != sel_end && abs_start < sel_end && abs_end > sel_start;
+
+    if !has_selection {
+        let mut style = Style::default().fg(fg).add_modifier(modifier);
+        if let Some(bg) = bg {
+            style = style.bg(bg);
+        }
+        spans.push(Span::styled(text.to_string(), style));
+        return;
+    }
+
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut current_segment = String::new();
+    let mut segment_selected = false;
+
+    for (idx, (byte_idx, c)) in chars.iter().enumerate() {
+        let char_abs = abs_start + byte_idx;
+        let is_char_selected = char_abs >= sel_start && char_abs < sel_end;
+
+        if idx == 0 {
+            segment_selected = is_char_selected;
+            current_segment.push(*c);
+        } else if is_char_selected == segment_selected {
+            current_segment.push(*c);
+        } else {
+            let style = if segment_selected {
+                Style::default()
+                    .bg(THEME.selection_bg)
+                    .fg(THEME.selection_fg)
+                    .add_modifier(modifier)
+            } else {
+                Style::default().fg(fg).add_modifier(modifier)
+            };
+            spans.push(Span::styled(current_segment, style));
+            segment_selected = is_char_selected;
+            current_segment = c.to_string();
+        }
+    }
+    if !current_segment.is_empty() {
+        let style = if segment_selected {
+            Style::default()
+                .bg(THEME.selection_bg)
+                .fg(THEME.selection_fg)
+                .add_modifier(modifier)
+        } else {
+            Style::default().fg(fg).add_modifier(modifier)
+        };
+        spans.push(Span::styled(current_segment, style));
+    }
+}
+
+/// Apply a background to every span on a line, preserving the selection highlight.
+fn add_line_bg(line: &mut Line<'static>, bg: Color) {
+    for span in line.spans.iter_mut() {
+        if span.style.bg == Some(THEME.selection_bg) {
+            continue;
+        }
+        span.style = span.style.bg(bg);
+    }
+}
+
+/// Code-fence body: light token tinting (strings, comments, numbers).
+fn render_code_line(
+    line_str: &str,
+    base_idx: usize,
+    sel_start: usize,
+    sel_end: usize,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    let chars: Vec<(usize, char)> = line_str.char_indices().collect();
+    let mut i = 0;
+    let mut seg_start = 0;
+    let mut comment_rest = false;
+
+    let push = |spans: &mut Vec<Span<'static>>, text: &str, fg: Color, rel: usize| {
+        push_segment(
+            spans,
+            text,
+            fg,
+            None,
+            Modifier::empty(),
+            base_idx + rel,
+            sel_start,
+            sel_end,
+        );
+    };
+
+    while i < chars.len() {
+        if comment_rest {
+            break;
+        }
+        let (b, c) = chars[i];
+        let next = chars.get(i + 1).map(|(_, n)| *n);
+
+        if (c == '/' && next == Some('/')) || (c == '-' && next == Some('-')) || c == '#' {
+            if b > seg_start {
+                push(&mut spans, &line_str[seg_start..b], THEME.code_fg, seg_start);
+            }
+            push(&mut spans, &line_str[b..], THEME.code_comment, b);
+            comment_rest = true;
+            break;
+        }
+
+        if c == '"' || c == '\'' {
+            if b > seg_start {
+                push(&mut spans, &line_str[seg_start..b], THEME.code_fg, seg_start);
+            }
+            let mut end = i + 1;
+            let mut closed = false;
+            while end < chars.len() {
+                if chars[end].1 == '\\' {
+                    end += 2;
+                    continue;
+                }
+                if chars[end].1 == c {
+                    closed = true;
+                    break;
+                }
+                end += 1;
+            }
+            if closed {
+                let content_end_byte = chars[end].0 + 1;
+                push(
+                    &mut spans,
+                    &line_str[b..content_end_byte],
+                    THEME.code_string,
+                    b,
+                );
+                i = end + 1;
+                seg_start = content_end_byte;
+                continue;
+            }
+        }
+
+        if c.is_ascii_digit() {
+            if b > seg_start {
+                push(&mut spans, &line_str[seg_start..b], THEME.code_fg, seg_start);
+            }
+            let mut end = i + 1;
+            while end < chars.len()
+                && (chars[end].1.is_ascii_alphanumeric()
+                    || chars[end].1 == '.'
+                    || chars[end].1 == '_')
+            {
+                end += 1;
+            }
+            let num_end_byte = chars[end - 1].0 + chars[end - 1].1.len_utf8();
+            push(
+                &mut spans,
+                &line_str[b..num_end_byte],
+                THEME.code_number,
+                b,
+            );
+            i = end;
+            seg_start = num_end_byte;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    if !comment_rest && seg_start < line_str.len() {
+        push(&mut spans, &line_str[seg_start..], THEME.code_fg, seg_start);
+    }
+
+    Line::from(spans)
+}
+
 fn parse_line_markdown(
     line_str: &str,
     base_idx: usize,
@@ -56,129 +238,169 @@ fn parse_line_markdown(
     let is_header = line_str.starts_with("#");
     let is_prompt = line_str.starts_with("> ");
     let is_tool = line_str.starts_with("▾ ") || line_str.starts_with("▸ ");
-    
+
     let line_fg = if is_indicator {
         default_fg
     } else if inside_code_block {
-        Color::LightYellow
-    } else if is_prompt {
-        Color::Cyan
-    } else if is_header {
-        Color::Cyan
+        THEME.code_fg
+    } else if is_header || is_prompt {
+        THEME.text_accent
     } else {
-        Color::White
+        THEME.text
     };
-    
+
     let default_modifier = if is_header || is_prompt {
         Modifier::BOLD
     } else {
         Modifier::empty()
     };
 
-    let mut append_styled = |text: &str, fg: Color, modifier: Modifier, start_rel_offset: usize| {
-        let abs_start = base_idx + start_rel_offset;
-        let abs_end = abs_start + text.len();
-        let has_selection = sel_start != sel_end && abs_start < sel_end && abs_end > sel_start;
-        
-        if has_selection {
-            let chars: Vec<(usize, char)> = text.char_indices().collect();
-            let mut current_segment = String::new();
-            let mut segment_selected = false;
-            
-            for (idx, (byte_idx, c)) in chars.iter().enumerate() {
-                let char_abs = abs_start + byte_idx;
-                let is_char_selected = char_abs >= sel_start && char_abs < sel_end;
-                
-                if idx == 0 {
-                    segment_selected = is_char_selected;
-                    current_segment.push(*c);
-                } else if is_char_selected == segment_selected {
-                    current_segment.push(*c);
-                } else {
-                    let style = if segment_selected {
-                        Style::default().bg(Color::Rgb(50, 75, 110)).fg(Color::White).add_modifier(modifier)
-                    } else {
-                        Style::default().fg(fg).add_modifier(modifier)
-                    };
-                    spans.push(Span::styled(current_segment, style));
-                    segment_selected = is_char_selected;
-                    current_segment = c.to_string();
-                }
-            }
-            if !current_segment.is_empty() {
-                let style = if segment_selected {
-                    Style::default().bg(Color::Rgb(50, 75, 110)).fg(Color::White).add_modifier(modifier)
-                } else {
-                    Style::default().fg(fg).add_modifier(modifier)
-                };
-                spans.push(Span::styled(current_segment, style));
-            }
-        } else {
-            spans.push(Span::styled(text.to_string(), Style::default().fg(fg).add_modifier(modifier)));
-        }
+    let mut append_styled = |text: &str,
+                             fg: Color,
+                             bg: Option<Color>,
+                             modifier: Modifier,
+                             start_rel_offset: usize| {
+        push_segment(
+            &mut spans,
+            text,
+            fg,
+            bg,
+            modifier,
+            base_idx + start_rel_offset,
+            sel_start,
+            sel_end,
+        );
     };
 
     if is_indicator {
-        append_styled(line_str, default_fg, Modifier::empty(), 0);
+        append_styled(line_str, default_fg, None, Modifier::empty(), 0);
     } else if inside_code_block {
-        append_styled(line_str, line_fg, Modifier::empty(), 0);
-    } else if is_header {
-        append_styled(line_str, Color::Cyan, Modifier::BOLD, 0);
-    } else if is_prompt {
-        append_styled(line_str, Color::Cyan, Modifier::BOLD, 0);
-    } else if is_tool {
-        append_styled(line_str, Color::Cyan, Modifier::BOLD, 0);
+        return render_code_line(line_str, base_idx, sel_start, sel_end);
+    } else if is_header || is_prompt || is_tool {
+        append_styled(line_str, THEME.text_accent, None, Modifier::BOLD, 0);
     } else {
         let mut display_str = line_str;
         let mut offset = 0;
-        
+
         let trimmed = line_str.trim_start();
         let leading_whitespace_len = line_str.len() - trimmed.len();
-        
+
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
             if leading_whitespace_len > 0 {
-                append_styled(&line_str[..leading_whitespace_len], Color::White, Modifier::empty(), 0);
+                append_styled(
+                    &line_str[..leading_whitespace_len],
+                    THEME.text,
+                    None,
+                    Modifier::empty(),
+                    0,
+                );
             }
-            append_styled("• ", Color::Cyan, Modifier::BOLD, leading_whitespace_len);
+            append_styled(
+                "• ",
+                THEME.text_accent,
+                None,
+                Modifier::BOLD,
+                leading_whitespace_len,
+            );
             display_str = &trimmed[2..];
             offset = leading_whitespace_len + 2;
         }
-        
+
         let chars: Vec<(usize, char)> = display_str.char_indices().collect();
         let mut i = 0;
         let mut normal_start_idx = 0;
-        
+
         while i < chars.len() {
-            if i + 1 < chars.len() && chars[i].1 == '*' && chars[i+1].1 == '*' {
+            if i + 1 < chars.len() && chars[i].1 == '*' && chars[i + 1].1 == '*' {
                 if chars[i].0 > normal_start_idx {
-                    append_styled(&display_str[normal_start_idx..chars[i].0], line_fg, default_modifier, offset + normal_start_idx);
+                    append_styled(
+                        &display_str[normal_start_idx..chars[i].0],
+                        line_fg,
+                        None,
+                        default_modifier,
+                        offset + normal_start_idx,
+                    );
                 }
-                
+
                 let mut bold_end_char_idx = i + 2;
                 let mut found_bold_close = false;
                 while bold_end_char_idx + 1 < chars.len() {
-                    if chars[bold_end_char_idx].1 == '*' && chars[bold_end_char_idx+1].1 == '*' {
+                    if chars[bold_end_char_idx].1 == '*'
+                        && chars[bold_end_char_idx + 1].1 == '*'
+                    {
                         found_bold_close = true;
                         break;
                     }
                     bold_end_char_idx += 1;
                 }
-                
+
                 if found_bold_close {
-                    let content_start = chars[i+2].0;
+                    let content_start = chars[i + 2].0;
                     let content_end = chars[bold_end_char_idx].0;
-                    append_styled(&display_str[content_start..content_end], Color::Yellow, Modifier::BOLD, offset + content_start);
+                    append_styled(
+                        &display_str[content_start..content_end],
+                        THEME.warning,
+                        None,
+                        Modifier::BOLD,
+                        offset + content_start,
+                    );
                     i = bold_end_char_idx + 2;
-                    normal_start_idx = if i < chars.len() { chars[i].0 } else { display_str.len() };
+                    normal_start_idx =
+                        if i < chars.len() { chars[i].0 } else { display_str.len() };
                     continue;
                 }
             }
-            
+
+            if chars[i].1 == '*' && !(i + 1 < chars.len() && chars[i + 1].1 == '*') {
+                let mut close = i + 1;
+                let mut found_close = false;
+                while close < chars.len() {
+                    if chars[close].1 == '*'
+                        && !(close + 1 < chars.len() && chars[close + 1].1 == '*')
+                    {
+                        found_close = true;
+                        break;
+                    }
+                    close += 1;
+                }
+
+                if found_close && close > i + 1 {
+                    if chars[i].0 > normal_start_idx {
+                        append_styled(
+                            &display_str[normal_start_idx..chars[i].0],
+                            line_fg,
+                            None,
+                            default_modifier,
+                            offset + normal_start_idx,
+                        );
+                    }
+                    let content_start = chars[i + 1].0;
+                    let content_end = chars[close].0;
+                    append_styled(
+                        &display_str[content_start..content_end],
+                        line_fg,
+                        None,
+                        Modifier::ITALIC,
+                        offset + content_start,
+                    );
+                    i = close + 1;
+                    normal_start_idx =
+                        if i < chars.len() { chars[i].0 } else { display_str.len() };
+                    continue;
+                }
+            }
+
             if chars[i].1 == '`' {
                 if chars[i].0 > normal_start_idx {
-                    append_styled(&display_str[normal_start_idx..chars[i].0], line_fg, default_modifier, offset + normal_start_idx);
+                    append_styled(
+                        &display_str[normal_start_idx..chars[i].0],
+                        line_fg,
+                        None,
+                        default_modifier,
+                        offset + normal_start_idx,
+                    );
                 }
-                
+
                 let mut code_end_char_idx = i + 1;
                 let mut found_code_close = false;
                 while code_end_char_idx < chars.len() {
@@ -188,22 +410,35 @@ fn parse_line_markdown(
                     }
                     code_end_char_idx += 1;
                 }
-                
+
                 if found_code_close {
-                    let content_start = chars[i+1].0;
+                    let content_start = chars[i + 1].0;
                     let content_end = chars[code_end_char_idx].0;
-                    append_styled(&display_str[content_start..content_end], Color::Magenta, Modifier::empty(), offset + content_start);
+                    append_styled(
+                        &display_str[content_start..content_end],
+                        THEME.code_fg,
+                        Some(THEME.code_bg),
+                        Modifier::empty(),
+                        offset + content_start,
+                    );
                     i = code_end_char_idx + 1;
-                    normal_start_idx = if i < chars.len() { chars[i].0 } else { display_str.len() };
+                    normal_start_idx =
+                        if i < chars.len() { chars[i].0 } else { display_str.len() };
                     continue;
                 }
             }
-            
+
             i += 1;
         }
-        
+
         if normal_start_idx < display_str.len() {
-            append_styled(&display_str[normal_start_idx..], line_fg, default_modifier, offset + normal_start_idx);
+            append_styled(
+                &display_str[normal_start_idx..],
+                line_fg,
+                None,
+                default_modifier,
+                offset + normal_start_idx,
+            );
         }
     }
 
@@ -428,6 +663,10 @@ pub struct TuiApp {
     last_usage: Option<(u32, u32, u32)>,
     context_window: usize,
     permission_mode: String,
+    /// (input, output) price per 1M tokens for the current model, when known.
+    model_price: Option<(f64, f64)>,
+    /// Accumulated session cost in USD.
+    total_cost: f64,
     side_area: Cell<Rect>,
     options_area: Cell<Rect>,
 }
@@ -489,6 +728,8 @@ impl TuiApp {
             last_usage: None,
             context_window: 0,
             permission_mode: "ask".into(),
+            model_price: None,
+            total_cost: 0.0,
             side_area: std::cell::Cell::new(Rect::default()),
             options_area: std::cell::Cell::new(Rect::default()),
         }
@@ -810,7 +1051,7 @@ impl TuiApp {
                     sel_end,
                     false,
                     true,
-                    Color::DarkGray,
+                    THEME.text_muted,
                 );
                 lines.push(line_with_sel);
                 continue;
@@ -830,19 +1071,22 @@ impl TuiApp {
                     sel_end,
                     false,
                     true,
-                    Color::DarkGray,
+                    THEME.text_muted,
                 );
                 lines.push(line_with_sel);
             } else {
-                let line_with_sel = parse_line_markdown(
+                let mut line_with_sel = parse_line_markdown(
                     orig_line,
                     os,
                     sel_start,
                     sel_end,
                     inside_code_block,
                     false,
-                    Color::White,
+                    THEME.text,
                 );
+                if inside_code_block {
+                    add_line_bg(&mut line_with_sel, THEME.code_bg);
+                }
                 lines.push(line_with_sel);
             }
         }
@@ -867,9 +1111,9 @@ impl TuiApp {
             } else {
                 let is_selected = idx >= sel_start && idx < sel_end;
                 let style = if is_selected {
-                    Style::default().bg(Color::Rgb(50, 75, 110)).fg(Color::White)
+                    Style::default().bg(THEME.selection_bg).fg(THEME.text)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(THEME.text)
                 };
                 current_line_spans.push(Span::styled(c.to_string(), style));
             }
@@ -1055,6 +1299,18 @@ impl TuiApp {
         Some(self.available_models[next].clone())
     }
 
+    /// Cycle permission mode: ask → allow → plan → ask.
+    pub fn cycle_permission(&mut self, agent: &Agent) {
+        let next = match self.permission_mode.as_str() {
+            "ask" => "allow",
+            "allow" => "plan",
+            _ => "ask",
+        };
+        agent.set_permission_mode(next);
+        self.permission_mode = next.to_string();
+        self.status = format!("permission: {next}");
+    }
+
     pub fn render(&self, frame: &mut Frame) {
         let area = frame.area();
         let chunks = Layout::default()
@@ -1082,9 +1338,9 @@ impl TuiApp {
         self.last_output_area.set(output_area);
 
         let status_style = if self.status == "idle" {
-            Style::default().fg(Color::Green)
+            Style::default().fg(THEME.success)
         } else {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default().fg(THEME.warning).add_modifier(Modifier::BOLD)
         };
         let spinner = if self.streaming {
             let frame_idx = (self.frame % SPINNER_FRAMES.len() as u64) as usize;
@@ -1093,16 +1349,16 @@ impl TuiApp {
             String::new()
         };
         let header = Paragraph::new(Line::from(vec![
-            Span::styled(" Forge ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(" Forge ", Style::default().fg(THEME.text_accent).add_modifier(Modifier::BOLD)),
             Span::raw(" | "),
             Span::styled(
                 format!("{} · {}", self.provider, self.model),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(THEME.warning),
             ),
             Span::raw(" | "),
             Span::styled(
                 format!("session: {}", &self.session_id[..8.min(self.session_id.len())]),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME.text_muted),
             ),
             Span::raw(" | "),
             Span::styled(format!("{spinner}{}", self.status), status_style),
@@ -1131,28 +1387,39 @@ impl TuiApp {
             Block::default().borders(Borders::ALL).title(title)
         };
         let input = if let Some(pa) = &self.pending_approval {
-            let title = " Approval Required ";
+            let is_plan = self.permission_mode == "plan";
+            let title = if is_plan {
+                " Plan — approve proposal? "
+            } else {
+                " Approval Required "
+            };
+            let verb = if is_plan { "Propose" } else { "Allow" };
+            let hint = if is_plan {
+                "  [y execute · n/Esc skip]"
+            } else {
+                "  [y allow · n/Esc deny]"
+            };
             Paragraph::new(Line::from(vec![
                 Span::styled(
-                    "⚠ Allow ",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    format!("⚠ {verb} "),
+                    Style::default().fg(THEME.warning).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("{}({})", pa.tool_name, pa.arguments),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(THEME.text),
                 ),
-                Span::styled("  [y allow · n/Esc deny]", Style::default().fg(Color::DarkGray)),
+                Span::styled(hint, Style::default().fg(THEME.text_muted)),
             ]))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(title)
-                    .border_style(Style::default().fg(Color::Yellow)),
+                    .border_style(Style::default().fg(THEME.warning)),
             )
         } else if self.input.is_empty() {
             Paragraph::new(Line::from(vec![Span::styled(
                 "Type a message… (Enter send · Shift+Enter newline · ↑/↓ history)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME.text_muted),
             )]))
             .block(input_block(" Input "))
         } else {
@@ -1194,21 +1461,21 @@ impl TuiApp {
                 let marker = if t.done { "[x]" } else { "[ ]" };
                 let text = format!("{marker} {}", truncate_str(&t.text, area.width.saturating_sub(3) as usize));
                 let base = if t.done {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(THEME.text_muted)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(THEME.text)
                 };
                 if self.todo_focus && i == self.todo_selected {
-                    ListItem::new(text).style(base.bg(Color::Rgb(40, 40, 60)))
+                    ListItem::new(text).style(base.bg(THEME.surface_alt))
                 } else {
                     ListItem::new(text).style(base)
                 }
             })
             .collect();
         let border = if self.todo_focus {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(THEME.text_accent)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(THEME.text_muted)
         };
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1217,7 +1484,7 @@ impl TuiApp {
         let content = if items.is_empty() {
             vec![ListItem::new(Line::from(vec![Span::styled(
                 "(empty — tell the agent to add tasks)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME.text_muted),
             )]))]
         } else {
             items
@@ -1240,14 +1507,14 @@ impl TuiApp {
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("{marker}{}. ", i + 1),
-                    Style::default().fg(if selected { Color::Black } else { Color::DarkGray }),
+                    Style::default().fg(if selected { THEME.on_accent } else { THEME.text_muted }),
                 ),
                 Span::styled(
                     opt.clone(),
                     if selected {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                        Style::default().fg(THEME.on_accent).bg(THEME.text_accent)
                     } else {
-                        Style::default().fg(Color::White)
+                        Style::default().fg(THEME.text)
                     },
                 ),
             ])));
@@ -1264,14 +1531,14 @@ impl TuiApp {
                     "{}Type your own answer: ",
                     if custom_selected { "> " } else { "  " }
                 ),
-                Style::default().fg(if custom_selected { Color::Black } else { Color::DarkGray }),
+                Style::default().fg(if custom_selected { THEME.on_accent } else { THEME.text_muted }),
             ),
             Span::styled(
                 custom_display,
                 if custom_selected {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                    Style::default().fg(THEME.on_accent).bg(THEME.text_accent)
                 } else {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(THEME.text_accent)
                 },
             ),
         ])));
@@ -1280,14 +1547,18 @@ impl TuiApp {
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!(" {} ", truncate_str(&o.prompt, 60)))
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(THEME.text_accent)),
         );
         frame.render_widget(list, inner);
     }
 
     fn status_bar(&self, width: u16) -> Line<'static> {
         let key_hint = if self.pending_approval.is_some() {
-            " y = allow · n/Esc = deny "
+            if self.permission_mode == "plan" {
+                " y = execute plan · n/Esc = skip "
+            } else {
+                " y = allow · n/Esc = deny "
+            }
         } else if self.pending_options.is_some() {
             " ↑/↓ choose · Enter pick · Esc dismiss "
         } else if self.todo_focus {
@@ -1295,7 +1566,7 @@ impl TuiApp {
         } else if self.streaming {
             " Esc / Ctrl+C: stop · mouse wheel: scroll · click tool header: expand/collapse "
         } else {
-            " Enter: send · Shift+Enter: newline · ↑/↓: history · Tab: model · Ctrl+T: todos · /help "
+            " Enter: send · Shift+Enter: newline · ↑/↓: history · Tab: model · Shift+Tab: perm · Ctrl+T: todos · /help "
         };
 
         let total = format_number(self.tokens_total);
@@ -1304,16 +1575,19 @@ impl TuiApp {
         } else {
             0
         };
-        let info = format!("{total} tokens · {pct}% used · perm: {}", self.permission_mode);
+        let mut info = format!("{total} tokens · {pct}% used · perm: {}", self.permission_mode);
+        if self.total_cost > 0.0 {
+            info.push_str(&format!(" · ${:.2}", self.total_cost));
+        }
 
         let pad = width.saturating_sub(key_hint.len() as u16).saturating_sub(info.len() as u16 + 2);
-        let mut spans = vec![Span::styled(key_hint, Style::default().fg(Color::DarkGray))];
+        let mut spans = vec![Span::styled(key_hint, Style::default().fg(THEME.text_muted))];
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad as usize), Style::default()));
         }
         spans.push(Span::styled(
             info,
-            Style::default().fg(if self.tokens_total > 0 { Color::Green } else { Color::DarkGray }),
+            Style::default().fg(if self.tokens_total > 0 { THEME.success } else { THEME.text_muted }),
         ));
         Line::from(spans)
     }
@@ -1341,7 +1615,7 @@ impl TuiApp {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Slash Commands ")
-                .style(Style::default().bg(Color::Black)),
+                .style(Style::default().bg(THEME.surface)),
         );
         frame.render_widget(help, help_area);
     }
@@ -1360,10 +1634,10 @@ impl TuiApp {
                 };
                 let style = if idx == self.model_picker_index {
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(THEME.warning)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(THEME.text)
                 };
                 ListItem::new(format!("{prefix}{model}")).style(style)
             })
@@ -1372,7 +1646,7 @@ impl TuiApp {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Select Model (Tab/Shift+Tab, Enter/Esc) ")
-                .style(Style::default().bg(Color::Black)),
+                .style(Style::default().bg(THEME.surface)),
         );
         frame.render_widget(picker, picker_area);
     }
@@ -1487,6 +1761,7 @@ fn set_model(
     session.model = model.clone();
     app.model = model;
     app.provider = agent.provider_name();
+    app.model_price = agent.pricing();
     if let Some(idx) = app.available_models.iter().position(|m| m == &app.model) {
         app.model_picker_index = idx;
     }
@@ -1512,7 +1787,7 @@ fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
             app.end_thought_block();
         }
         AgentEvent::ContentDelta { text } => {
-            app.append_stream(&text, Style::default().fg(Color::White));
+            app.append_stream(&text, Style::default().fg(THEME.text));
         }
         AgentEvent::ToolCallStart { name, arguments } => {
             app.end_stream();
@@ -1562,11 +1837,23 @@ fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
         AgentEvent::ApprovalRequest { tool_name, arguments } => {
             app.end_stream();
             let args_short = truncate_str(&arguments, 120);
+            let is_plan = app.permission_mode == "plan";
             app.push_output(
-                &format!("⚠ {tool_name} requires confirmation: {args_short}"),
-                Style::default().fg(Color::Yellow),
+                &format!(
+                    "⚠ {tool_name} {}: {args_short}",
+                    if is_plan {
+                        "proposal"
+                    } else {
+                        "requires confirmation"
+                    }
+                ),
+                Style::default().fg(THEME.warning),
             );
-            app.status = "awaiting approval (y/N)".into();
+            app.status = if is_plan {
+                "plan proposal awaiting approval (y/N)".into()
+            } else {
+                "awaiting approval (y/N)".into()
+            };
             app.pending_approval = Some(PendingApproval {
                 tool_name,
                 arguments: args_short,
@@ -1590,19 +1877,23 @@ fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
             app.end_stream();
             app.push_output(
                 &format!("↻ retry {attempt}: {error}"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME.text_muted),
             );
         }
         AgentEvent::Error { message } => {
             app.end_stream();
             app.push_output(
                 &format!("[error] {message}"),
-                Style::default().fg(Color::Red),
+                Style::default().fg(THEME.error),
             );
         }
         AgentEvent::TokenUsage { prompt, completion, total } => {
             app.last_usage = Some((prompt, completion, total));
             app.tokens_total = total as u64;
+            if let Some((in_price, out_price)) = app.model_price {
+                let cost = (prompt as f64 * in_price + completion as f64 * out_price) / 1_000_000.0;
+                app.total_cost += cost;
+            }
             app.status = format!("done ({total} tokens)");
         }
         AgentEvent::Done => {
@@ -1662,7 +1953,7 @@ async fn finish_inflight(
         in_flight.handle.abort();
         app.push_output(
             "[cancelled] agent turn aborted",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(THEME.warning),
         );
         app.status = "idle".into();
         app.end_stream();
@@ -1683,21 +1974,21 @@ async fn finish_inflight(
             }
             *session = updated_session;
             if let Err(e) = result {
-                app.push_output(&format!("Error: {e}"), Style::default().fg(Color::Red));
+                app.push_output(&format!("Error: {e}"), Style::default().fg(THEME.error));
             }
             let _ = store.save(session);
         }
         Ok(Err(e)) => {
             app.push_output(
                 &format!("Agent task failed: {e}"),
-                Style::default().fg(Color::Red),
+                Style::default().fg(THEME.error),
             );
         }
         Err(_) => {
             in_flight.handle.abort();
             app.push_output(
                 "[timeout] agent task did not finish; aborted so UI can accept input",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(THEME.warning),
             );
         }
     }
@@ -1739,7 +2030,9 @@ pub async fn run_tui(
     let mut app = TuiApp::new(session, available_models);
     app.provider = agent.provider_name();
     app.context_window = agent.context_window();
-    app.permission_mode = if agent.full_auto() { "allow" } else { "ask" }.into();
+    app.permission_mode = agent.permission_mode();
+    app.model_price = agent.pricing();
+    app.total_cost = agent.total_cost();
     let mut in_flight: Option<InFlight> = None;
     // UI -> agent channel for interactive tool approvals (recreated per turn).
     let mut approval_resp_tx: Option<UnboundedSender<bool>> = None;
@@ -2243,13 +2536,9 @@ pub async fn run_tui(
                                 app.input = chars.into_iter().collect();
                             }
                             KeyCode::Tab => {
-                                if let Some(model) = app.cycle_model(
-                                    if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                        -1
-                                    } else {
-                                        1
-                                    },
-                                ) {
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    app.cycle_permission(&agent);
+                                } else if let Some(model) = app.cycle_model(1) {
                                     set_model(&agent, session, &mut app, model);
                                 }
                             }
@@ -2447,58 +2736,58 @@ async fn handle_slash_command(
                 set_model(&agent, session, app, model.clone());
                 app.push_output(
                     &format!("Model set to {model}"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(THEME.warning),
                 );
             } else {
                 app.push_output(
                     &format!("Current model: {}", app.model),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(THEME.warning),
                 );
                 if !app.available_models.is_empty() {
                     app.push_output(
                         &format!("Available: {}", app.available_models.join(", ")),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(THEME.text_muted),
                     );
                 }
             }
         }
         SlashCommand::Tools => {
             let tools = agent.tool_names().join(", ");
-            app.push_output(&format!("Tools: {tools}"), Style::default().fg(Color::Blue));
+            app.push_output(&format!("Tools: {tools}"), Style::default().fg(THEME.info));
         }
         SlashCommand::Resume => {
             if let Ok(Some(s)) = store.latest() {
                 *session = s;
                 app.session_id = session.id.clone();
                 app.model = session.model.clone();
-                app.push_output("Resumed last session", Style::default().fg(Color::Green));
+                app.push_output("Resumed last session", Style::default().fg(THEME.success));
             } else {
-                app.push_output("No session to resume", Style::default().fg(Color::Red));
+                app.push_output("No session to resume", Style::default().fg(THEME.error));
             }
         }
         SlashCommand::Ssh(args) => {
             if let Some(mgr) = ssh_manager {
                 handle_ssh_command(args, app, mgr).await;
             } else {
-                app.push_output("SSH not configured", Style::default().fg(Color::Red));
+                app.push_output("SSH not configured", Style::default().fg(THEME.error));
             }
         }
         SlashCommand::Debug => {
             app.push_output(
                 "Debug mode: use `forge debug analyze <log>` or `forge debug start`",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(THEME.warning),
             );
         }
         SlashCommand::Parallel(tasks) => {
             if tasks.is_empty() {
                 app.push_output(
                     "Usage: /parallel task1; task2; task3",
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(THEME.warning),
                 );
             } else {
                 app.push_output(
                     &format!("Running {} parallel tasks...", tasks.len()),
-                    Style::default().fg(Color::Magenta),
+                    Style::default().fg(THEME.accent_alt),
                 );
                 app.status = "parallel...".into();
 
@@ -2517,7 +2806,7 @@ async fn handle_slash_command(
                             };
                             app.push_output(
                                 &format!("{status} {}", task.description),
-                                Style::default().fg(Color::Magenta),
+                                Style::default().fg(THEME.accent_alt),
                             );
                             if let Some(result) = task.result {
                                 let truncated = if result.len() > 300 {
@@ -2525,7 +2814,7 @@ async fn handle_slash_command(
                                 } else {
                                     result
                                 };
-                                app.push_output(&truncated, Style::default().fg(Color::DarkGray));
+                                app.push_output(&truncated, Style::default().fg(THEME.text_muted));
                             }
                         }
                         app.status = "idle".into();
@@ -2533,7 +2822,7 @@ async fn handle_slash_command(
                     Err(e) => {
                         app.push_output(
                             &format!("Parallel execution failed: {e}"),
-                            Style::default().fg(Color::Red),
+                            Style::default().fg(THEME.error),
                         );
                         app.status = "idle".into();
                     }
@@ -2546,7 +2835,7 @@ async fn handle_slash_command(
                 let state = if app.show_todo_panel { "shown" } else { "hidden" };
                 app.push_output(
                     &format!("Todo panel {state} (Ctrl+T toggles)"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(THEME.warning),
                 );
             } else {
                 match args[0].as_str() {
@@ -2555,7 +2844,7 @@ async fn handle_slash_command(
                         if text.is_empty() {
                             app.push_output(
                                 "Usage: /todo add <task>",
-                                Style::default().fg(Color::Yellow),
+                                Style::default().fg(THEME.warning),
                             );
                         } else {
                             app.todo_add(&text);
@@ -2563,7 +2852,7 @@ async fn handle_slash_command(
                             let _ = store.save(session);
                             app.push_output(
                                 &format!("Added todo: {text}"),
-                                Style::default().fg(Color::Green),
+                                Style::default().fg(THEME.success),
                             );
                         }
                     }
@@ -2574,12 +2863,12 @@ async fn handle_slash_command(
                         let _ = store.save(session);
                         app.push_output(
                             &format!("Cleared {n} todos"),
-                            Style::default().fg(Color::Yellow),
+                            Style::default().fg(THEME.warning),
                         );
                     }
                     other => app.push_output(
                         &format!("Unknown todo op: {other} (add, clear)"),
-                        Style::default().fg(Color::Red),
+                        Style::default().fg(THEME.error),
                     ),
                 }
             }
@@ -2589,12 +2878,12 @@ async fn handle_slash_command(
             if names.is_empty() {
                 app.push_output(
                     "No skills loaded. Set [tools].skills_dir in config.",
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(THEME.warning),
                 );
             } else {
                 app.push_output(
                     &format!("Skills: {}", names.join(", ")),
-                    Style::default().fg(Color::Blue),
+                    Style::default().fg(THEME.info),
                 );
             }
         }
@@ -2603,7 +2892,7 @@ async fn handle_slash_command(
             let state = if app.mouse_enabled { "enabled" } else { "disabled" };
             app.push_output(
                 &format!("✔ Mouse capture and app-owned text selection {}", state),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(THEME.warning),
             );
         }
         SlashCommand::New => {
@@ -2618,20 +2907,20 @@ async fn handle_slash_command(
             app.tool_cards.clear();
             app.selection = None;
             app.scroll_offset = None;
-            app.push_output("New session started", Style::default().fg(Color::Green));
+            app.push_output("New session started", Style::default().fg(THEME.success));
         }
         SlashCommand::Compact => {
             if session.messages.len() < 20 {
                 app.push_output(
                     "Session too short to compact (need 20+ messages)",
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(THEME.warning),
                 );
             } else {
                 let dropped = session.messages.len() - 10;
                 session.messages.drain(..dropped);
                 app.push_output(
                     &format!("Compacted session (dropped {dropped} oldest messages)"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(THEME.warning),
                 );
             }
         }
@@ -2641,7 +2930,7 @@ async fn handle_slash_command(
         SlashCommand::Unknown(cmd) => {
             app.push_output(
                 &format!("Unknown command: {cmd}. Try /help"),
-                Style::default().fg(Color::Red),
+                Style::default().fg(THEME.error),
             );
         }
     }
@@ -2657,7 +2946,7 @@ async fn handle_ssh_command(args: Vec<String>, app: &mut TuiApp, mgr: &forge_ssh
             .collect();
         app.push_output(
             &format!("SSH hosts:\n{}", hosts.join("\n")),
-            Style::default().fg(Color::Blue),
+            Style::default().fg(THEME.info),
         );
         return;
     }
@@ -2665,21 +2954,21 @@ async fn handle_ssh_command(args: Vec<String>, app: &mut TuiApp, mgr: &forge_ssh
         match mgr.connect(&args[1]).await {
             Ok(info) => app.push_output(
                 &format!("Connected to {} ({}@{})", info.alias, info.user, info.host),
-                Style::default().fg(Color::Green),
+                Style::default().fg(THEME.success),
             ),
             Err(e) => app.push_output(
                 &format!("Connection failed: {e}"),
-                Style::default().fg(Color::Red),
+                Style::default().fg(THEME.error),
             ),
         }
         return;
     }
     if args[0] == "exec" && args.len() > 2 {
         match mgr.exec(&args[1], &args[2..].join(" ")).await {
-            Ok(out) => app.push_output(&out, Style::default().fg(Color::White)),
+            Ok(out) => app.push_output(&out, Style::default().fg(THEME.text)),
             Err(e) => app.push_output(
                 &format!("SSH exec failed: {e}"),
-                Style::default().fg(Color::Red),
+                Style::default().fg(THEME.error),
             ),
         }
     }

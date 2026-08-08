@@ -163,10 +163,20 @@ pub struct RuntimeAgentConfig {
     pub context_window: usize,
     /// When true, destructive shell commands never require interactive approval.
     pub full_auto: bool,
+    /// "ask" | "allow" | "plan".
+    pub permission_mode: String,
+    /// Accumulated cost in USD for the current session.
+    pub total_cost: f64,
 }
 
 impl From<&ForgeConfig> for RuntimeAgentConfig {
     fn from(config: &ForgeConfig) -> Self {
+        let permission_mode = match &config.agent.permission_mode {
+            Some(m) if m == "plan" => "plan".to_string(),
+            Some(m) => m.clone(),
+            None if config.agent.full_auto => "allow".to_string(),
+            None => "ask".to_string(),
+        };
         Self {
             model: config.agent.model.clone(),
             temperature: config.agent.temperature,
@@ -177,6 +187,8 @@ impl From<&ForgeConfig> for RuntimeAgentConfig {
             summarize_threshold: config.session.summarize_threshold,
             context_window: config.session.context_window,
             full_auto: config.agent.full_auto,
+            permission_mode,
+            total_cost: 0.0,
         }
     }
 }
@@ -227,6 +239,30 @@ impl Agent {
 
     pub fn full_auto(&self) -> bool {
         self.config.read().full_auto
+    }
+
+    pub fn permission_mode(&self) -> String {
+        self.config.read().permission_mode.clone()
+    }
+
+    pub fn set_permission_mode(&self, mode: &str) {
+        self.config.write().permission_mode = mode.to_string();
+    }
+
+    pub fn pricing(&self) -> Option<(f64, f64)> {
+        crate::pricing::price_per_1m(&self.config.read().model)
+    }
+
+    pub fn total_cost(&self) -> f64 {
+        self.config.read().total_cost
+    }
+
+    fn add_cost(&self, input_tokens: u64, output_tokens: u64) {
+        if let Some(cost) =
+            crate::pricing::cost_for(&self.config.read().model, input_tokens, output_tokens)
+        {
+            self.config.write().total_cost += cost;
+        }
     }
 
     pub fn context_window(&self) -> usize {
@@ -294,6 +330,10 @@ impl Agent {
             };
 
             session.total_tokens += response.usage.total_tokens as u64;
+            self.add_cost(
+                response.usage.prompt_tokens as u64,
+                response.usage.completion_tokens as u64,
+            );
             emit(AgentEvent::TokenUsage {
                 prompt: response.usage.prompt_tokens,
                 completion: response.usage.completion_tokens,
@@ -447,6 +487,24 @@ impl Agent {
         is_destructive_command(command)
     }
 
+    /// Tools that only read the codebase / session; always allowed in "plan" mode.
+    fn is_read_only_tool(name: &str) -> bool {
+        matches!(
+            name,
+            "read_file"
+                | "list_dir"
+                | "grep"
+                | "glob"
+                | "project_index"
+                | "search_codebase"
+                | "code_outline"
+                | "read_skill"
+                | "git_status"
+                | "git_diff"
+                | "git_log"
+        )
+    }
+
     async fn execute_tools_concurrent(
         &self,
         calls: &[ToolCall],
@@ -492,12 +550,22 @@ impl Agent {
                 continue;
             }
 
-            if self.requires_approval(call) {
+            let plan_mode = self.config.read().permission_mode == "plan";
+            let needs_check = if plan_mode {
+                !Self::is_read_only_tool(&name)
+            } else {
+                self.requires_approval(call)
+            };
+
+            if needs_check {
                 let allowed = interactivity.approval.ask(&name, &args_str, emit).await;
 
                 if !allowed {
-                    let output =
-                        "Command was not approved by the user; execution skipped.".to_string();
+                    let output = if plan_mode {
+                        "[plan] proposal not approved; execution skipped.".to_string()
+                    } else {
+                        "Command was not approved by the user; execution skipped.".to_string()
+                    };
                     emit(AgentEvent::ToolCallEnd {
                         name,
                         output: output.clone(),
