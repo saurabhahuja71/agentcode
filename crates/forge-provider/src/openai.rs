@@ -3,8 +3,6 @@ use crate::{
     TokenUsage, ToolCall,
 };
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
-use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -27,6 +25,7 @@ impl OpenAiCompatibleProvider {
     ) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(300))
+            .pool_max_idle_per_host(0)
             .build()
             .expect("http client");
         Self {
@@ -215,103 +214,117 @@ impl LlmProvider for OpenAiCompatibleProvider {
             .send()
             .await
             .map_err(|e| ProviderError::Http(e.to_string()))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        tracing::debug!(
+            %status,
+            content_type = ?resp.headers().get("content-type"),
+            "stream response received"
+        );
+        if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(ProviderError::Api(format!("{status}: {text}")));
         }
 
-        let stream = resp.bytes_stream().eventsource();
-        // flat_map so a single SSE chunk can yield content *and* Done when the
-        // provider packs finish_reason into the last content delta (common with
-        // SGLang / some OpenAI-compatible servers). Returning only ContentDelta
-        // previously left the HTTP body open until the 300s client timeout —
-        // the TUI stayed "busy" after the first answer.
-        let mapped = stream.flat_map(|event| {
-            futures::stream::iter(parse_sse_event(event))
-        });
+        // Buffer the full SSE body before yielding events.
+        // True line-by-line streaming is nicer in the TUI, but several local
+        // OpenAI-compatible stacks (SGLang, some Ollama reverse proxies) hang
+        // the HTTP body / connection pool after the last content delta unless
+        // the response is fully drained. This keeps turns reliable.
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| ProviderError::Http(e.to_string()))?;
+        let text = String::from_utf8_lossy(&bytes);
+        tracing::debug!(len = text.len(), "stream body read");
 
-        Ok(Box::pin(mapped))
-    }
-}
-
-fn parse_sse_event(
-    event: Result<eventsource_stream::Event, eventsource_stream::EventStreamError<reqwest::Error>>,
-) -> Vec<StreamEvent> {
-    match event {
-        Ok(ev) => {
-            if ev.data == "[DONE]" {
-                return vec![StreamEvent::Done(ChatResponse {
+        let mut events = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(':') {
+                continue;
+            }
+            let Some(data) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            if data == "[DONE]" {
+                events.push(StreamEvent::Done(ChatResponse {
                     message: Message::Assistant {
                         content: None,
                         tool_calls: None,
                     },
                     finish_reason: Some("stop".into()),
                     usage: TokenUsage::default(),
-                })];
+                }));
+                continue;
             }
-            match serde_json::from_str::<StreamChunk>(&ev.data) {
-                Ok(chunk) => {
-                    let usage = chunk.usage.map(|u| TokenUsage {
-                        prompt_tokens: u.prompt_tokens,
-                        completion_tokens: u.completion_tokens,
-                        total_tokens: u.total_tokens,
-                    });
-                    let mut out = Vec::new();
-                    if let Some(choice) = chunk.choices.into_iter().next() {
-                        if let Some(reasoning) = choice.delta.reasoning_content {
-                            if !reasoning.is_empty() {
-                                out.push(StreamEvent::ReasoningDelta(reasoning));
-                            }
-                        }
-                        if let Some(content) = choice.delta.content {
-                            if !content.is_empty() {
-                                out.push(StreamEvent::ContentDelta(content));
-                            }
-                        }
-                        if let Some(tool_calls) = choice.delta.tool_calls {
-                            for tc in tool_calls {
-                                let args = tc
-                                    .function
-                                    .as_ref()
-                                    .and_then(|f| f.arguments.clone())
-                                    .unwrap_or_default();
-                                let name = tc.function.as_ref().and_then(|f| f.name.clone());
-                                out.push(StreamEvent::ToolCallDelta {
-                                    index: tc.index,
-                                    id: tc.id,
-                                    name,
-                                    arguments_delta: args,
-                                });
-                            }
-                        }
-                        if choice.finish_reason.is_some() {
-                            out.push(StreamEvent::Done(ChatResponse {
-                                message: Message::Assistant {
-                                    content: None,
-                                    tool_calls: None,
-                                },
-                                finish_reason: choice.finish_reason,
-                                usage: usage.unwrap_or_default(),
-                            }));
-                        }
-                    } else if let Some(usage) = usage {
-                        // Usage-only final chunk with empty choices — treat as Done
-                        // so the consumer unblocks even without finish_reason/[DONE].
-                        out.push(StreamEvent::Done(ChatResponse {
-                            message: Message::Assistant {
-                                content: None,
-                                tool_calls: None,
-                            },
-                            finish_reason: Some("stop".into()),
-                            usage,
-                        }));
-                    }
-                    out
-                }
-                Err(e) => vec![StreamEvent::Error(e.to_string())],
+            match serde_json::from_str::<StreamChunk>(data) {
+                Ok(chunk) => events.extend(parse_stream_chunk(chunk)),
+                Err(e) => events.push(StreamEvent::Error(format!("parse error: {e}"))),
             }
         }
-        Err(e) => vec![StreamEvent::Error(e.to_string())],
+
+        Ok(Box::pin(futures::stream::iter(events)))
     }
+}
+
+/// One SSE `data:` JSON object can carry content, tool-call deltas, *and*
+/// `finish_reason` together (common with SGLang). Emit every signal so the
+/// agent loop always sees a terminal Done event.
+fn parse_stream_chunk(chunk: StreamChunk) -> Vec<StreamEvent> {
+    let usage = chunk.usage.map(|u| TokenUsage {
+        prompt_tokens: u.prompt_tokens,
+        completion_tokens: u.completion_tokens,
+        total_tokens: u.total_tokens,
+    });
+    let mut out = Vec::new();
+    if let Some(choice) = chunk.choices.into_iter().next() {
+        if let Some(reasoning) = choice.delta.reasoning_content {
+            if !reasoning.is_empty() {
+                out.push(StreamEvent::ReasoningDelta(reasoning));
+            }
+        }
+        if let Some(content) = choice.delta.content {
+            if !content.is_empty() {
+                out.push(StreamEvent::ContentDelta(content));
+            }
+        }
+        if let Some(tool_calls) = choice.delta.tool_calls {
+            for tc in tool_calls {
+                let args = tc
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.arguments.clone())
+                    .unwrap_or_default();
+                let name = tc.function.as_ref().and_then(|f| f.name.clone());
+                out.push(StreamEvent::ToolCallDelta {
+                    index: tc.index,
+                    id: tc.id,
+                    name,
+                    arguments_delta: args,
+                });
+            }
+        }
+        if choice.finish_reason.is_some() {
+            out.push(StreamEvent::Done(ChatResponse {
+                message: Message::Assistant {
+                    content: None,
+                    tool_calls: None,
+                },
+                finish_reason: choice.finish_reason,
+                usage: usage.unwrap_or_default(),
+            }));
+        }
+    } else if let Some(usage) = usage {
+        // Usage-only final chunk with empty choices — treat as Done so the
+        // consumer unblocks even without finish_reason / [DONE].
+        out.push(StreamEvent::Done(ChatResponse {
+            message: Message::Assistant {
+                content: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            usage,
+        }));
+    }
+    out
 }

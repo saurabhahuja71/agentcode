@@ -75,9 +75,9 @@ flowchart TB
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| OpenAI-compatible API | ✅ Done | `forge-provider/openai.rs` |
-| Ollama | ✅ Done | `forge-provider/ollama.rs` |
-| Streaming | ✅ Done | SSE via `eventsource-stream` |
+| OpenAI-compatible API | ✅ Done | `forge-provider/openai.rs` (SGLang, vLLM, cloud) |
+| Ollama | ✅ Done | `forge-provider/ollama.rs` (wraps OpenAI-compatible + pull) |
+| Streaming | ✅ Done | SSE parsed from buffered body (reliable with SGLang/Ollama) |
 | Tool/function calling | ✅ Done | Full round-trip in agent loop |
 | Automatic failover | ✅ Done | `ProviderRouter` by priority |
 | TOML config | ✅ Done | `config.example.toml` |

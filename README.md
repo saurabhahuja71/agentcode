@@ -80,22 +80,44 @@ flowchart TB
 
 ## Installation
 
+### Prebuilt binary (Linux x86_64) — recommended
+
+Download the latest release from
+[GitHub Releases](https://github.com/saurabhahuja71/agentcode/releases):
+
+```bash
+# Binary
+curl -fsSL -o forge \
+  https://github.com/saurabhahuja71/agentcode/releases/download/v1.1.0/forge
+chmod +x forge
+sudo mv forge /usr/local/bin/
+
+# Or tarball + checksums
+curl -fsSL -O https://github.com/saurabhahuja71/agentcode/releases/download/v1.1.0/forge-linux-x86_64.tar.gz
+curl -fsSL -O https://github.com/saurabhahuja71/agentcode/releases/download/v1.1.0/SHA256SUMS
+sha256sum -c SHA256SUMS
+tar xzf forge-linux-x86_64.tar.gz
+chmod +x forge && sudo mv forge /usr/local/bin/
+
+forge --version   # forge 1.1.0
+forge init        # writes ~/.forge/config.toml
+```
+
+**Runtime:** Linux x86_64 (glibc). Optional: `git` (worktrees / git tools), `ssh` (remote tools).
+
+### Build from source
+
 **Requirements:** Rust 1.75+, `bash`, `git` (optional), `ssh` (for remote features)
 
 ```bash
-# Clone and build
-git clone <repo-url> forge
-cd forge
+git clone https://github.com/saurabhahuja71/agentcode.git
+cd agentcode
 cargo build --release
-
-# Install binary
 cargo install --path crates/forge
-
-# Initialize default config
 forge init
 ```
 
-Config is written to `~/.forge/config.toml`. See `config.example.toml` for all options.
+Config is written to `~/.forge/config.toml`. See [`config.example.toml`](config.example.toml) for all options. Local stacks (Ollama / SGLang) are documented below and in that example file.
 
 ## Quick start
 
@@ -115,14 +137,101 @@ forge chat --session <session-id>
 
 ### Provider setup
 
-**Ollama (default):**
+Forge talks to **any OpenAI-compatible Chat Completions API**, plus a first-class
+**Ollama** provider. Providers are tried in `priority` order (lower = first) with
+automatic failover. Point `base_url` at your server; Forge appends
+`/v1/chat/completions` unless the URL already ends with `/v1` or
+`/chat/completions`.
+
+#### Ollama (default local setup)
+
+Works well for daily coding with GGUF models (Q4_K_M / Q5_K_M are good defaults).
+
 ```bash
-ollama pull llama3.2
-forge --trust
+# Install & pull a model (local or remote Ollama host)
+ollama pull qwen2.5-coder:32b
+# or: ollama pull llama3.2
 ```
 
-**OpenAI / Azure / Groq / Together / etc.:**
-Edit `~/.forge/config.toml`:
+`~/.forge/config.toml` (or pass `-c path/to.toml`):
+
+```toml
+[agent]
+model = "qwen2.5-coder:32b"
+temperature = 0.2
+max_tokens = 4096
+max_turns = 50
+
+[[providers]]
+name = "ollama"
+kind = "ollama"
+# Local default; use host:port if Ollama is remote
+base_url = "http://127.0.0.1:11434"
+models = ["qwen2.5-coder:32b", "llama3.2", "codellama"]
+enabled = true
+priority = 10
+```
+
+```bash
+forge --trust
+# or one-shot with an alternate config
+forge --config config.example.toml --trust exec "summarize this repo"
+```
+
+Tips:
+- Match `[agent].model` to a name Ollama actually serves (`ollama list`).
+- For a second Ollama on another port: set `base_url = "http://127.0.0.1:11435"`.
+- Smaller context windows (e.g. 32k) keep long agent sessions stable — see `[session]` in the example config.
+
+#### SGLang (OpenAI-compatible, high throughput)
+
+SGLang exposes an OpenAI-compatible API. Use `kind = "openai_compatible"`, leave
+`models = []` to accept whatever model name the server registered, and set a
+dummy API key if the server expects one.
+
+```toml
+[agent]
+model = "qwen2.5-coder-32b-q4_k_m.gguf"   # must match SGLang --model-path / served name
+temperature = 0.2
+max_tokens = 4096
+max_turns = 50
+
+[[providers]]
+name = "sglang"
+kind = "openai_compatible"
+# Server root only — Forge adds /v1/chat/completions
+base_url = "http://127.0.0.1:30000"
+api_key = "sglang"
+models = []          # empty = accept any model name
+enabled = true
+priority = 1
+```
+
+```bash
+# After SGLang is listening (local or via SSH tunnel to :30000)
+forge --config ~/.forge/config.toml --trust
+# smoke test
+forge --trust exec "reply with the single word: pong"
+```
+
+Tips:
+- Prefer **AWQ INT4** or **BF16 safetensors** on NVIDIA GPUs when quality matters; GGUF Q4 is fine for throughput.
+- If the server is remote, open an SSH tunnel and keep `base_url` on localhost, e.g.  
+  `ssh -N -L 30000:127.0.0.1:30000 user@gpu-host`
+- Optional Ollama fallback (higher `priority` number = tried later):
+
+```toml
+[[providers]]
+name = "ollama-fallback"
+kind = "ollama"
+base_url = "http://127.0.0.1:11434"
+models = ["qwen2.5-coder:32b"]
+enabled = true
+priority = 20
+```
+
+#### OpenAI / Azure / Groq / Together / etc.
+
 ```toml
 [[providers]]
 name = "openai"
@@ -137,7 +246,7 @@ priority = 5
 model = "gpt-4o"
 ```
 
-Set `OPENAI_API_KEY` in your environment. Providers are tried in priority order with automatic failover.
+Set `OPENAI_API_KEY` (or the env name you put in `api_key_env`) in your environment.
 
 ## Slash commands (TUI)
 

@@ -1,5 +1,10 @@
 # Forge configuration
-# Copy to ~/.forge/config.toml or pass with --config
+# Copy to ~/.forge/config.toml or pass with: forge --config path/to.toml
+#
+# Local stacks that work well:
+#   - Ollama (kind = "ollama") — daily GGUF coding models
+#   - SGLang / vLLM / llama.cpp server (kind = "openai_compatible")
+# base_url is the server root; Forge appends /v1/chat/completions when needed.
 
 [agent]
 model = "llama3.2"
@@ -7,16 +12,31 @@ temperature = 0.2
 max_tokens = 8192
 max_turns = 50
 full_auto = false
-system_prompt = "You are Forge, a precise and capable coding agent."
+system_prompt = "You are Forge, a precise and capable coding agent. Prefer tools (read, search, shell, edit) over guessing."
 
 # Providers are tried in priority order (lower = first)
 [[providers]]
 name = "ollama"
 kind = "ollama"
-base_url = "http://localhost:11434"
-models = ["llama3.2", "codellama", "qwen2.5-coder"]
+base_url = "http://127.0.0.1:11434"
+models = ["llama3.2", "codellama", "qwen2.5-coder", "qwen2.5-coder:32b"]
 enabled = true
 priority = 10
+
+# SGLang (or any OpenAI-compatible local server). Disable Ollama above or raise
+# its priority if you want SGLang first. models = [] accepts any served name.
+# [[providers]]
+# name = "sglang"
+# kind = "openai_compatible"
+# base_url = "http://127.0.0.1:30000"
+# api_key = "sglang"
+# models = []
+# enabled = true
+# priority = 1
+#
+# Then set e.g.:
+# [agent]
+# model = "qwen2.5-coder-32b-q4_k_m.gguf"
 
 [[providers]]
 name = "openai"
