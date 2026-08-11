@@ -4,6 +4,7 @@ use forge_safety::{AuditLogger, Sandbox};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{env, fs};
 
 pub struct ShellTool {
     sandbox: Arc<Sandbox>,
@@ -47,7 +48,8 @@ impl Tool for ShellTool {
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("command required".into()))?;
 
-        self.sandbox.validate_command(command)?;
+        let executable_command = expand_ssh_alias(command);
+        self.sandbox.validate_command(&executable_command)?;
 
         let cwd = if let Some(dir) = arguments["working_dir"].as_str() {
             self.sandbox.resolve_path(dir)?
@@ -59,7 +61,7 @@ impl Tool for ShellTool {
             self.timeout,
             tokio::process::Command::new("bash")
                 .arg("-c")
-                .arg(command)
+                .arg(&executable_command)
                 .current_dir(&cwd)
                 .output(),
         )
@@ -78,7 +80,7 @@ impl Tool for ShellTool {
         self.audit.log(
             "shell",
             "execute",
-            json!({ "command": command, "exit_code": exit_code }),
+            json!({ "command": command, "executed_command": executable_command, "exit_code": exit_code }),
             exit_code == 0,
         );
 
@@ -87,4 +89,44 @@ impl Tool for ShellTool {
             is_error: exit_code != 0,
         })
     }
+}
+
+/// Expand a command's first token when it is an SSH alias declared in the
+/// active user's bashrc. This keeps aliases dynamic and lets the normal shell
+/// safety validator inspect the resulting executable command.
+fn expand_ssh_alias(command: &str) -> String {
+    let trimmed = command.trim_start();
+    let prefix_len = command.len() - trimmed.len();
+    let token_end = trimmed
+        .find(char::is_whitespace)
+        .unwrap_or(trimmed.len());
+    let name = &trimmed[..token_end];
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return command.to_string();
+    }
+
+    let home = env::var_os("HOME").map(std::path::PathBuf::from);
+    let Some(home) = home else { return command.to_string() };
+    let path = home.join(".bashrc");
+    let Ok(contents) = fs::read_to_string(path) else { return command.to_string() };
+
+    for line in contents.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("alias ") else { continue };
+        let Some((alias_name, value)) = rest.split_once('=') else { continue };
+        if alias_name.trim() != name {
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')));
+        let Some(value) = value else { continue };
+        if !value.trim_start().starts_with("ssh ") {
+            continue;
+        }
+        let suffix = &trimmed[token_end..];
+        return format!("{}{}{}", &command[..prefix_len], value, suffix);
+    }
+    command.to_string()
 }

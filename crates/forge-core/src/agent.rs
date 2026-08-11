@@ -222,6 +222,11 @@ impl Agent {
         self.config.write().model = model;
     }
 
+    /// Select the provider request mode for the next turn.
+    pub fn set_stream(&self, stream: bool) {
+        self.config.write().stream = stream;
+    }
+
     pub fn model(&self) -> String {
         self.config.read().model.clone()
     }
@@ -307,6 +312,7 @@ impl Agent {
         }
 
         for turn in 0..cfg.max_turns {
+            compact_for_context(&mut session.messages, cfg.context_window);
             emit(AgentEvent::TurnStart { turn });
             self.hooks.emit(&HookContext {
                 phase: HookPhase::TurnStart,
@@ -945,6 +951,26 @@ impl Agent {
             finish_reason: Some("stop".into()),
             usage: forge_provider::TokenUsage::default(),
         })
+    }
+}
+
+/// Keep tool results from exhausting a local model context window. Tool output
+/// has already been emitted to the caller, so retaining a bounded prefix is
+/// sufficient for the model's next decision and keeps headless runs usable.
+fn compact_for_context(messages: &mut Vec<Message>, context_window: usize) {
+    const MAX_TOOL_CHARS: usize = 12_000;
+    for message in messages.iter_mut() {
+        if let Message::Tool { content, .. } = message {
+            if content.len() > MAX_TOOL_CHARS {
+                content.truncate(MAX_TOOL_CHARS);
+                content.push_str("\n[tool output truncated in conversation context]");
+            }
+        }
+    }
+
+    let budget = context_window.saturating_mul(3) / 4;
+    if estimate_tokens(messages) > budget {
+        *messages = summarize_messages(messages, 8);
     }
 }
 

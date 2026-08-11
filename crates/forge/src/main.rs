@@ -173,7 +173,10 @@ async fn main() -> Result<()> {
             ssh_manager.clone(),
             config.ssh.allowed_commands.clone(),
         );
-        tracing::info!(count = config.ssh.hosts.len(), "registered SSH remote tools");
+        tracing::info!(
+            count = config.ssh.hosts.len(),
+            "registered SSH remote tools"
+        );
     }
     let tools = Arc::new(tool_registry);
 
@@ -196,7 +199,12 @@ async fn main() -> Result<()> {
         if ctx.phase == HookPhase::PostTool {
             if let (Some(name), Some(output)) = (&ctx.tool_name, &ctx.output) {
                 let ok = !ctx.is_error.unwrap_or(false);
-                audit_for_hooks.log(name, "hook", serde_json::json!({ "output_len": output.len() }), ok);
+                audit_for_hooks.log(
+                    name,
+                    "hook",
+                    serde_json::json!({ "output_len": output.len() }),
+                    ok,
+                );
             }
         }
     });
@@ -218,7 +226,9 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Some(Commands::Chat { session: session_id }) => {
+        Some(Commands::Chat {
+            session: session_id,
+        }) => {
             let mut session = if let Some(id) = session_id {
                 store.load(&id)?
             } else {
@@ -237,7 +247,32 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Exec { prompt, format }) => {
             let mut session = Session::new(workspace, agent.model());
-            agent.run_turn(&mut session, prompt, None, Interactivity::none()).await?;
+            // Preserve complete native tool-call envelopes in headless mode.
+            agent.set_stream(false);
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            agent
+                .run_turn(&mut session, prompt, Some(event_tx), Interactivity::none())
+                .await?;
+            while let Ok(event) = event_rx.try_recv() {
+                use forge_core::AgentEvent;
+                match event {
+                    AgentEvent::ToolCallStart { name, arguments } => {
+                        eprintln!("[tool:start] {name} {arguments}");
+                    }
+                    AgentEvent::ToolCallEnd {
+                        name,
+                        output,
+                        is_error,
+                    } => {
+                        eprintln!("[tool:end] {name} error={is_error}\n{output}");
+                    }
+                    AgentEvent::Error { message } => eprintln!("[agent:error] {message}"),
+                    AgentEvent::Retrying { attempt, error } => {
+                        eprintln!("[retry:{attempt}] {error}");
+                    }
+                    _ => {}
+                }
+            }
             if config.session.auto_save {
                 store.save(&session)?;
             }
@@ -249,14 +284,14 @@ async fn main() -> Result<()> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            let executor = ParallelExecutor::new(
-                agent.clone(),
-                workspace,
-                agent.model(),
-            );
+            let executor = ParallelExecutor::new(agent.clone(), workspace, agent.model());
             let results = executor.run_parallel(task_list).await?;
             for task in results {
-                println!("=== {} [{}] ===", task.description, format_status(&task.status));
+                println!(
+                    "=== {} [{}] ===",
+                    task.description,
+                    format_status(&task.status)
+                );
                 if let Some(result) = task.result {
                     println!("{result}");
                 }
@@ -356,7 +391,10 @@ fn print_exec_output(session: &Session, format: &str) {
     });
     match format {
         "json" => {
-            println!("{}", serde_json::to_string_pretty(session).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(session).unwrap_or_default()
+            );
         }
         _ => {
             if let Some(content) = last {
