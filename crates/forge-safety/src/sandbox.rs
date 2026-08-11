@@ -1,10 +1,11 @@
 use crate::SafetyError;
 use forge_config::SafetyConfig;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct Sandbox {
     workspace: PathBuf,
-    restrict_to_workspace: bool,
+    restrict_to_workspace: AtomicBool,
     allowed_commands: Vec<String>,
     confirm_destructive: bool,
     full_auto: bool,
@@ -14,7 +15,7 @@ impl Sandbox {
     pub fn new(workspace: PathBuf, safety: &SafetyConfig, full_auto: bool) -> Self {
         Self {
             workspace: workspace.canonicalize().unwrap_or(workspace),
-            restrict_to_workspace: safety.restrict_to_workspace,
+            restrict_to_workspace: AtomicBool::new(safety.restrict_to_workspace),
             allowed_commands: safety.allowed_commands.clone(),
             confirm_destructive: safety.confirm_destructive,
             full_auto,
@@ -54,16 +55,34 @@ impl Sandbox {
             let canonical_home = h.canonicalize().unwrap_or_else(|_| h.clone());
             let ssh_dir = canonical_home.join(".ssh");
             let git_config = canonical_home.join(".gitconfig");
-            
+
             canonical.starts_with(&ssh_dir) || canonical == git_config
         } else {
             false
         };
 
-        if self.restrict_to_workspace && !canonical.starts_with(&self.workspace) && !is_allowed_global_path {
+        if self.restrict_to_workspace.load(Ordering::Relaxed)
+            && !canonical.starts_with(&self.workspace)
+            && !is_allowed_global_path
+        {
             return Err(SafetyError::PathEscape(canonical.display().to_string()));
         }
         Ok(canonical)
+    }
+
+    pub fn restrict_to_workspace(&self) -> bool {
+        self.restrict_to_workspace.load(Ordering::Relaxed)
+    }
+
+    pub fn set_restrict_to_workspace(&self, restricted: bool) {
+        self.restrict_to_workspace
+            .store(restricted, Ordering::Relaxed);
+    }
+
+    pub fn toggle_restrict_to_workspace(&self) -> bool {
+        !self
+            .restrict_to_workspace
+            .fetch_xor(true, Ordering::Relaxed)
     }
 
     pub fn validate_command(&self, command: &str) -> Result<(), SafetyError> {
@@ -82,7 +101,10 @@ impl Sandbox {
 }
 
 /// Check that the first token of `command` is in `allowed_commands`.
-pub fn validate_allowed_command(command: &str, allowed_commands: &[String]) -> Result<(), SafetyError> {
+pub fn validate_allowed_command(
+    command: &str,
+    allowed_commands: &[String],
+) -> Result<(), SafetyError> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return Err(SafetyError::CommandDenied("empty command".into()));

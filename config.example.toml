@@ -12,6 +12,7 @@ temperature = 0.2
 max_tokens = 8192
 max_turns = 50
 full_auto = false
+permission_mode = "allow"
 system_prompt = "You are Forge, a precise and capable coding agent. Prefer tools (read, search, shell, edit) over guessing."
 
 # Providers are tried in priority order (lower = first)
@@ -58,18 +59,19 @@ priority = 30
 
 [safety]
 workspace_trust_required = true
-restrict_to_workspace = true
+restrict_to_workspace = false
 confirm_destructive = true
 audit_log = true
 # allowed_commands defaults include podman, docker, systemctl, journalctl, ssh, and
 # other common Linux/dev tools. Uncomment to customize:
-# allowed_commands = ["ls", "cat", "podman", ...]
+# allowed_commands = ["ls", "cat", "ssh", "sudo", "podman", ...]
 
 [tools]
 file_tools = true
 shell = true
 git = true
 search = true
+http = true
 shell_timeout_secs = 120
 
 [session]

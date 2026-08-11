@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    sandbox: Arc<Sandbox>,
 }
 
 impl ToolRegistry {
@@ -19,6 +20,7 @@ impl ToolRegistry {
     ) -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
+            sandbox: sandbox.clone(),
         };
 
         if config.file_tools {
@@ -63,6 +65,10 @@ impl ToolRegistry {
                 super::index::new_index_tools(sandbox.clone(), audit.clone());
             registry.register(Arc::new(index_tool));
             registry.register(Arc::new(search_tool));
+        }
+
+        if config.http {
+            registry.register(Arc::new(super::http::HttpRequestTool::new()));
         }
 
         if config.shell {
@@ -112,6 +118,14 @@ impl ToolRegistry {
 
     pub fn names(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
+    }
+
+    pub fn restrict_to_workspace(&self) -> bool {
+        self.sandbox.restrict_to_workspace()
+    }
+
+    pub fn toggle_restrict_to_workspace(&self) -> bool {
+        self.sandbox.toggle_restrict_to_workspace()
     }
 
     pub async fn execute(&self, name: &str, arguments: Value) -> Result<ToolResult, ToolError> {

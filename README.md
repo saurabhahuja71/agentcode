@@ -254,6 +254,7 @@ Set `OPENAI_API_KEY` (or the env name you put in `api_key_env`) in your environm
 |---------|-------------|
 | `/help` | Show command help |
 | `/model [name]` | Show or set model |
+| `/mode ask|allow|plan` | Change permission mode |
 | `/tools` | List available tools |
 | `/clear` | Clear output pane |
 | `/new` | Start a fresh session |
@@ -266,18 +267,23 @@ Set `OPENAI_API_KEY` (or the env name you put in `api_key_env`) in your environm
 | `/parallel task1; task2` | Queue parallel tasks |
 | `/debug` | Debug mode info |
 | `/skills` | List loaded skills |
-| `/toggle-mouse` | Enable/disable mouse capture + text selection |
+| `/toggle-mouse` | Enable/disable mouse capture + text selection (`F6` or `F8`) |
+| `/workspace` | Toggle workspace path restriction |
+
+The `http_request` tool is enabled by default and supports bounded GET, POST,
+PUT, PATCH, and DELETE requests to explicit `http://` or `https://` URLs. Set
+`[tools].http = false` to disable it.
 
 ## TUI features
 
-- **Streaming transcript** with word-wrap, mouse wheel scrolling, and click-to-expand/collapse tool cards (long outputs are auto-folded).
+- **Streaming transcript** with word-wrap, visible scrollbar, mouse wheel scrolling, `PageUp`/`PageDown` scrolling, and click-to-expand/collapse tool cards (long outputs are auto-folded).
 - **Text selection & copy:** drag with the mouse to select, `Ctrl+Shift+C` / `Ctrl+C` copies; double/triple click selects word/line. `Ctrl+X` cuts the input selection, `Ctrl+V` pastes.
 - **Multiline input:** `Shift+Enter` inserts a newline, `↑/↓` recall history, `Ctrl+A` selects all in the input.
-- **Tool approvals:** destructive tools ask before running — the input area becomes a `y`/`n` prompt (`Esc` denies, `Ctrl+C` cancels the turn).
+- **Tool approvals:** Forge starts in `allow` mode by default. Use `/mode ask` for destructive-command prompts, or `/mode plan` to approve proposed changes before execution.
 - **Reasoning display:** providers that stream `reasoning_content` render a timed `💭 Thought: 14.3s` block with the model's reasoning, collapsed by default.
 - **Options picker:** when the agent calls `ask_options`, a numbered picker appears (`↑/↓` + `Enter`, or click); typing a printable character switches to a custom answer, `Esc` dismisses.
 - **Todo side panel:** live task list on the right. `Ctrl+T` opens/focuses/closes it, `Space` toggles an item, `d` deletes, `[`/`]` resize while focused, mouse clicks toggle. Todos persist with the session and sync with the agent's `todo` tool.
-- **Rich status bar:** spinner, live token count + context usage %, and permission mode (`ask`/`allow`).
+- **Rich status bar:** spinner, live token count + context usage %, permission mode, and mouse state. Mouse capture starts off; use `F6`, `F8`, or `/mouse` to enable it. Permission mode cycles with `Shift+Tab`; `Ctrl+Q` quits immediately.
 - **Focus management:** the todo panel can hold keyboard focus (`Tab`/`Esc` returns to input); the input stays reachable at all times.
 
 ## CLI reference

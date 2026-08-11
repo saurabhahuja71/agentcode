@@ -1,5 +1,5 @@
-use anyhow::Result;
 use crate::theme::THEME;
+use anyhow::Result;
 use forge_core::{
     Agent, AgentEvent, ApprovalGate, Interactivity, OptionsGate, Session, SessionStore, TodoItem,
 };
@@ -7,7 +7,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
     Frame,
 };
 use std::cell::Cell;
@@ -153,7 +156,12 @@ fn render_code_line(
 
         if (c == '/' && next == Some('/')) || (c == '-' && next == Some('-')) || c == '#' {
             if b > seg_start {
-                push(&mut spans, &line_str[seg_start..b], THEME.code_fg, seg_start);
+                push(
+                    &mut spans,
+                    &line_str[seg_start..b],
+                    THEME.code_fg,
+                    seg_start,
+                );
             }
             push(&mut spans, &line_str[b..], THEME.code_comment, b);
             comment_rest = true;
@@ -162,7 +170,12 @@ fn render_code_line(
 
         if c == '"' || c == '\'' {
             if b > seg_start {
-                push(&mut spans, &line_str[seg_start..b], THEME.code_fg, seg_start);
+                push(
+                    &mut spans,
+                    &line_str[seg_start..b],
+                    THEME.code_fg,
+                    seg_start,
+                );
             }
             let mut end = i + 1;
             let mut closed = false;
@@ -193,7 +206,12 @@ fn render_code_line(
 
         if c.is_ascii_digit() {
             if b > seg_start {
-                push(&mut spans, &line_str[seg_start..b], THEME.code_fg, seg_start);
+                push(
+                    &mut spans,
+                    &line_str[seg_start..b],
+                    THEME.code_fg,
+                    seg_start,
+                );
             }
             let mut end = i + 1;
             while end < chars.len()
@@ -204,12 +222,7 @@ fn render_code_line(
                 end += 1;
             }
             let num_end_byte = chars[end - 1].0 + chars[end - 1].1.len_utf8();
-            push(
-                &mut spans,
-                &line_str[b..num_end_byte],
-                THEME.code_number,
-                b,
-            );
+            push(&mut spans, &line_str[b..num_end_byte], THEME.code_number, b);
             i = end;
             seg_start = num_end_byte;
             continue;
@@ -255,22 +268,19 @@ fn parse_line_markdown(
         Modifier::empty()
     };
 
-    let mut append_styled = |text: &str,
-                             fg: Color,
-                             bg: Option<Color>,
-                             modifier: Modifier,
-                             start_rel_offset: usize| {
-        push_segment(
-            &mut spans,
-            text,
-            fg,
-            bg,
-            modifier,
-            base_idx + start_rel_offset,
-            sel_start,
-            sel_end,
-        );
-    };
+    let mut append_styled =
+        |text: &str, fg: Color, bg: Option<Color>, modifier: Modifier, start_rel_offset: usize| {
+            push_segment(
+                &mut spans,
+                text,
+                fg,
+                bg,
+                modifier,
+                base_idx + start_rel_offset,
+                sel_start,
+                sel_end,
+            );
+        };
 
     if is_indicator {
         append_styled(line_str, default_fg, None, Modifier::empty(), 0);
@@ -325,9 +335,7 @@ fn parse_line_markdown(
                 let mut bold_end_char_idx = i + 2;
                 let mut found_bold_close = false;
                 while bold_end_char_idx + 1 < chars.len() {
-                    if chars[bold_end_char_idx].1 == '*'
-                        && chars[bold_end_char_idx + 1].1 == '*'
-                    {
+                    if chars[bold_end_char_idx].1 == '*' && chars[bold_end_char_idx + 1].1 == '*' {
                         found_bold_close = true;
                         break;
                     }
@@ -345,8 +353,11 @@ fn parse_line_markdown(
                         offset + content_start,
                     );
                     i = bold_end_char_idx + 2;
-                    normal_start_idx =
-                        if i < chars.len() { chars[i].0 } else { display_str.len() };
+                    normal_start_idx = if i < chars.len() {
+                        chars[i].0
+                    } else {
+                        display_str.len()
+                    };
                     continue;
                 }
             }
@@ -384,8 +395,11 @@ fn parse_line_markdown(
                         offset + content_start,
                     );
                     i = close + 1;
-                    normal_start_idx =
-                        if i < chars.len() { chars[i].0 } else { display_str.len() };
+                    normal_start_idx = if i < chars.len() {
+                        chars[i].0
+                    } else {
+                        display_str.len()
+                    };
                     continue;
                 }
             }
@@ -422,8 +436,11 @@ fn parse_line_markdown(
                         offset + content_start,
                     );
                     i = code_end_char_idx + 1;
-                    normal_start_idx =
-                        if i < chars.len() { chars[i].0 } else { display_str.len() };
+                    normal_start_idx = if i < chars.len() {
+                        chars[i].0
+                    } else {
+                        display_str.len()
+                    };
                     continue;
                 }
             }
@@ -448,7 +465,7 @@ fn parse_line_markdown(
 fn wrap_text(text: &str, width: usize) -> Vec<std::ops::Range<usize>> {
     let mut lines = Vec::new();
     let mut start_idx = 0;
-    
+
     for line in text.split('\n') {
         let line_len = line.len();
         if line_len == 0 {
@@ -456,15 +473,15 @@ fn wrap_text(text: &str, width: usize) -> Vec<std::ops::Range<usize>> {
             start_idx += 1; // account for \n
             continue;
         }
-        
+
         let chars: Vec<(usize, char)> = line.char_indices().collect();
         let mut i = 0;
-        
+
         while i < chars.len() {
             let mut word_end_char_idx = i;
             let mut width_so_far = 0;
             let mut last_space_char_idx = None;
-            
+
             while word_end_char_idx < chars.len() {
                 let (_, c) = chars[word_end_char_idx];
                 let c_width = if c == '\t' { 4 } else { 1 };
@@ -477,7 +494,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<std::ops::Range<usize>> {
                 }
                 word_end_char_idx += 1;
             }
-            
+
             let break_char_idx = if word_end_char_idx == chars.len() {
                 word_end_char_idx
             } else if let Some(space_idx) = last_space_char_idx {
@@ -485,24 +502,24 @@ fn wrap_text(text: &str, width: usize) -> Vec<std::ops::Range<usize>> {
             } else {
                 word_end_char_idx
             };
-            
+
             let break_char_idx = if break_char_idx <= i {
                 i + 1
             } else {
                 break_char_idx
             };
-            
+
             let byte_start = start_idx + chars[i].0;
             let byte_end = if break_char_idx < chars.len() {
                 start_idx + chars[break_char_idx].0
             } else {
                 start_idx + line_len
             };
-            
+
             lines.push(byte_start..byte_end);
             i = break_char_idx;
         }
-        
+
         start_idx += line_len + 1; // account for \n
     }
     lines
@@ -510,20 +527,20 @@ fn wrap_text(text: &str, width: usize) -> Vec<std::ops::Range<usize>> {
 
 fn write_clipboard(text: &str, app: &mut TuiApp) -> bool {
     app.yank_buffer = text.to_string();
-    
+
     let local_res = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.to_string()));
     let osc_res = write_osc52(text);
-    
+
     local_res.is_ok() || osc_res.is_ok()
 }
 
 fn write_osc52(text: &str) -> std::io::Result<()> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use std::io::Write;
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    
+
     let encoded = STANDARD.encode(text);
     let osc_sequence = format!("\x1B]52;c;{}\x07", encoded);
-    
+
     let mut stdout = std::io::stdout();
     stdout.write_all(osc_sequence.as_bytes())?;
     stdout.flush()?;
@@ -533,7 +550,7 @@ fn write_osc52(text: &str) -> std::io::Result<()> {
 fn clean_copied_text(text: &str) -> String {
     let re_ansi = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
     let cleaned = re_ansi.replace_all(text, "").into_owned();
-    
+
     let mut lines = Vec::new();
     for line in cleaned.lines() {
         let mut l = line;
@@ -552,7 +569,7 @@ fn clean_copied_text(text: &str) -> String {
         }
         lines.push(l);
     }
-    
+
     lines.join("\n")
 }
 
@@ -637,6 +654,7 @@ pub struct TuiApp {
     pub last_click_type: ClickType,
     pub yank_buffer: String,
     pub mouse_enabled: bool,
+    pub restrict_to_workspace: bool,
     pub input_cursor_idx: usize,
     pub input_selection_start: Option<usize>,
     pub scroll_offset: Option<u16>,
@@ -705,7 +723,8 @@ impl TuiApp {
             double_click_state: None,
             last_click_type: ClickType::Single,
             yank_buffer: String::new(),
-            mouse_enabled: true,
+            mouse_enabled: false,
+            restrict_to_workspace: true,
             input_cursor_idx: 0,
             input_selection_start: None,
             scroll_offset: None,
@@ -727,7 +746,7 @@ impl TuiApp {
             tokens_total: 0,
             last_usage: None,
             context_window: 0,
-            permission_mode: "ask".into(),
+            permission_mode: "allow".into(),
             model_price: None,
             total_cost: 0.0,
             side_area: std::cell::Cell::new(Rect::default()),
@@ -828,7 +847,9 @@ impl TuiApp {
     }
 
     fn paste_from_clipboard(&mut self) -> bool {
-        let local_text = arboard::Clipboard::new().ok().and_then(|mut cb| cb.get_text().ok());
+        let local_text = arboard::Clipboard::new()
+            .ok()
+            .and_then(|mut cb| cb.get_text().ok());
         if let Some(text) = local_text {
             self.paste_into_input(&text);
             true
@@ -921,8 +942,8 @@ impl TuiApp {
             if fidx < r.folded_end {
                 return r.orig_start + (fidx - r.folded_start);
             }
-            delta +=
-                (r.orig_end as isize - r.orig_start as isize) - (r.folded_end as isize - r.folded_start as isize);
+            delta += (r.orig_end as isize - r.orig_start as isize)
+                - (r.folded_end as isize - r.folded_start as isize);
         }
         (fidx as isize + delta).max(0) as usize
     }
@@ -944,9 +965,10 @@ impl TuiApp {
     /// Toggle a completed tool card when `char_idx` is inside its header. Returns
     /// true when a card was toggled (callers should skip starting a selection).
     fn toggle_tool_card_at(&mut self, char_idx: usize) -> bool {
-        let target = self.tool_cards.iter().position(|c| {
-            c.completed && char_idx >= c.header_start && char_idx < c.header_end
-        });
+        let target = self
+            .tool_cards
+            .iter()
+            .position(|c| c.completed && char_idx >= c.header_start && char_idx < c.header_end);
         if let Some(idx) = target {
             let card = &mut self.tool_cards[idx];
             card.collapsed = !card.collapsed;
@@ -1099,11 +1121,11 @@ impl TuiApp {
             Some((s, e)) => (s, e),
             None => (0, 0),
         };
-        
+
         let text = &self.input;
         let mut current_line_spans = Vec::new();
         let chars: Vec<char> = text.chars().collect();
-        
+
         for (idx, &c) in chars.iter().enumerate() {
             if c == '\n' {
                 lines.push(Line::from(current_line_spans));
@@ -1119,7 +1141,7 @@ impl TuiApp {
             }
         }
         lines.push(Line::from(current_line_spans));
-        
+
         lines
     }
 
@@ -1150,30 +1172,40 @@ impl TuiApp {
         let inner_y = area.y + 1;
         let inner_w = area.width - 2;
         let inner_h = area.height - 2;
-        
+
         if x < inner_x || x >= inner_x + inner_w || y < inner_y || y >= inner_y + inner_h {
             return None;
         }
-        
+
         let scroll_y = self.output_scroll_y(area.width, area.height);
         let wrapped_line_idx = (y - inner_y) + scroll_y;
-        
+
         let (folded, regions) = self.fold();
         let wrapped_lines = wrap_text(&folded, inner_w as usize);
         if (wrapped_line_idx as usize) < wrapped_lines.len() {
             let range = &wrapped_lines[wrapped_line_idx as usize];
             let col = (x - inner_x) as usize;
-            
+
             let line_sub = &folded[range.start..range.end];
-            let mut byte_offset = 0;
-            for (char_idx, (b_idx, _)) in line_sub.char_indices().enumerate() {
-                if char_idx == col {
-                    byte_offset = b_idx;
-                    break;
-                }
-                byte_offset = b_idx + 1;
-            }
             let orig_start = self.map_folded_to_orig(&regions, range.start);
+            // A folded placeholder does not have a one-to-one byte mapping
+            // to the original body. Return its known safe boundary instead of
+            // producing an offset inside a UTF-8 glyph or the hidden body.
+            if self
+                .folded_placeholder_orig(&regions, range.start)
+                .is_some()
+            {
+                return Some(orig_start);
+            }
+
+            // `col` is a terminal column, while Rust string offsets are bytes.
+            // Never approximate an offset with `b_idx + 1`: that can land in
+            // the middle of a multi-byte glyph such as `▾`.
+            let byte_offset = line_sub
+                .char_indices()
+                .nth(col)
+                .map(|(byte_idx, _)| byte_idx)
+                .unwrap_or(line_sub.len());
             Some(orig_start + byte_offset)
         } else {
             None
@@ -1185,7 +1217,7 @@ impl TuiApp {
         if char_idx >= text.len() {
             return;
         }
-        
+
         let mut word_start = char_idx;
         while word_start > 0 {
             let prev_char = text[..word_start].chars().next_back();
@@ -1199,7 +1231,7 @@ impl TuiApp {
                 break;
             }
         }
-        
+
         let mut word_end = char_idx;
         while word_end < text.len() {
             let next_char = text[word_end..].chars().next();
@@ -1213,7 +1245,7 @@ impl TuiApp {
                 break;
             }
         }
-        
+
         self.selection = Some((word_start, word_end));
     }
 
@@ -1222,7 +1254,7 @@ impl TuiApp {
         if char_idx >= text.len() {
             return;
         }
-        
+
         let mut line_start = char_idx;
         while line_start > 0 {
             let prev_char = text[..line_start].chars().next_back();
@@ -1235,7 +1267,7 @@ impl TuiApp {
                 break;
             }
         }
-        
+
         let mut line_end = char_idx;
         while line_end < text.len() {
             let next_char = text[line_end..].chars().next();
@@ -1248,7 +1280,7 @@ impl TuiApp {
                 break;
             }
         }
-        
+
         self.selection = Some((line_start, line_end));
     }
 
@@ -1259,7 +1291,7 @@ impl TuiApp {
             .unwrap_or(self.model_picker_index)
     }
 
-    /// Scroll offset so the newest output stays visible (accounting for borders + wrap).
+    /// Scroll offset for the transcript (accounting for borders + wrap).
     fn output_scroll_y(&self, area_width: u16, area_height: u16) -> u16 {
         let inner_width = area_width.saturating_sub(2);
         let inner_height = area_height.saturating_sub(2);
@@ -1270,7 +1302,33 @@ impl TuiApp {
         let total_lines = self
             .wrapped_line_count(inner_width as usize)
             .min(u16::MAX as usize) as u16;
-        total_lines.saturating_sub(inner_height)
+        let max_scroll = total_lines.saturating_sub(inner_height);
+        self.scroll_offset.unwrap_or(max_scroll).min(max_scroll)
+    }
+
+    fn scroll_output_by(&mut self, delta: i16) {
+        let area = self.last_output_area.get();
+        let inner_width = area.width.saturating_sub(2);
+        let inner_height = area.height.saturating_sub(2);
+        let total_lines = self
+            .wrapped_line_count(inner_width as usize)
+            .min(u16::MAX as usize) as u16;
+        let max_scroll = total_lines.saturating_sub(inner_height);
+        let current = self.output_scroll_y(area.width, area.height);
+        let next = if delta.is_negative() {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            current.saturating_add(delta as u16).min(max_scroll)
+        };
+        self.scroll_offset = if next >= max_scroll { None } else { Some(next) };
+    }
+
+    fn output_contains(&self, column: u16, row: u16) -> bool {
+        let area = self.last_output_area.get();
+        column >= area.x
+            && column < area.x.saturating_add(area.width)
+            && row >= area.y
+            && row < area.y.saturating_add(area.height)
     }
 
     pub fn open_model_picker(&mut self) {
@@ -1340,7 +1398,9 @@ impl TuiApp {
         let status_style = if self.status == "idle" {
             Style::default().fg(THEME.success)
         } else {
-            Style::default().fg(THEME.warning).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(THEME.warning)
+                .add_modifier(Modifier::BOLD)
         };
         let spinner = if self.streaming {
             let frame_idx = (self.frame % SPINNER_FRAMES.len() as u64) as usize;
@@ -1349,7 +1409,12 @@ impl TuiApp {
             String::new()
         };
         let header = Paragraph::new(Line::from(vec![
-            Span::styled(" Forge ", Style::default().fg(THEME.text_accent).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Forge ",
+                Style::default()
+                    .fg(THEME.text_accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" | "),
             Span::styled(
                 format!("{} · {}", self.provider, self.model),
@@ -1357,7 +1422,10 @@ impl TuiApp {
             ),
             Span::raw(" | "),
             Span::styled(
-                format!("session: {}", &self.session_id[..8.min(self.session_id.len())]),
+                format!(
+                    "session: {}",
+                    &self.session_id[..8.min(self.session_id.len())]
+                ),
                 Style::default().fg(THEME.text_muted),
             ),
             Span::raw(" | "),
@@ -1372,6 +1440,22 @@ impl TuiApp {
             .scroll((scroll_y, 0));
         frame.render_widget(output, output_area);
 
+        let inner_width = output_area.width.saturating_sub(2);
+        let inner_height = output_area.height.saturating_sub(2);
+        let total_lines = self
+            .wrapped_line_count(inner_width as usize)
+            .min(u16::MAX as usize) as u16;
+        let max_scroll = total_lines.saturating_sub(inner_height);
+        if max_scroll > 0 {
+            let mut scrollbar_state = ScrollbarState::new(max_scroll as usize)
+                .position(scroll_y.min(max_scroll) as usize);
+            let scrollbar = Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .thumb_style(Style::default().fg(THEME.text_accent))
+                .track_style(Style::default().fg(THEME.surface_alt));
+            frame.render_stateful_widget(scrollbar, output_area, &mut scrollbar_state);
+        }
+
         if side_area.width > 0 {
             self.render_todo_panel(frame, side_area);
         }
@@ -1379,13 +1463,11 @@ impl TuiApp {
         let (input_row, input_col) = self.get_input_cursor_row_col();
         let input_inner_h = chunks[2].height.saturating_sub(2);
         let input_scroll_y = input_row.saturating_sub(input_inner_h.saturating_sub(1));
-        
+
         let input_inner_w = chunks[2].width.saturating_sub(2);
         let input_scroll_x = input_col.saturating_sub(input_inner_w.saturating_sub(1));
 
-        let input_block = |title: &'static str| {
-            Block::default().borders(Borders::ALL).title(title)
-        };
+        let input_block = |title: &'static str| Block::default().borders(Borders::ALL).title(title);
         let input = if let Some(pa) = &self.pending_approval {
             let is_plan = self.permission_mode == "plan";
             let title = if is_plan {
@@ -1402,7 +1484,9 @@ impl TuiApp {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     format!("⚠ {verb} "),
-                    Style::default().fg(THEME.warning).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(THEME.warning)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("{}({})", pa.tool_name, pa.arguments),
@@ -1459,7 +1543,10 @@ impl TuiApp {
             .enumerate()
             .map(|(i, t)| {
                 let marker = if t.done { "[x]" } else { "[ ]" };
-                let text = format!("{marker} {}", truncate_str(&t.text, area.width.saturating_sub(3) as usize));
+                let text = format!(
+                    "{marker} {}",
+                    truncate_str(&t.text, area.width.saturating_sub(3) as usize)
+                );
                 let base = if t.done {
                     Style::default().fg(THEME.text_muted)
                 } else {
@@ -1493,7 +1580,9 @@ impl TuiApp {
     }
 
     fn render_options_picker(&self, frame: &mut Frame, area: Rect) {
-        let Some(o) = &self.pending_options else { return };
+        let Some(o) = &self.pending_options else {
+            return;
+        };
         let row_count = o.options.len() + 1;
         let w = 72.min(area.width.saturating_sub(4));
         let h = (row_count as u16 + 5).min(area.height.saturating_sub(4));
@@ -1507,7 +1596,11 @@ impl TuiApp {
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("{marker}{}. ", i + 1),
-                    Style::default().fg(if selected { THEME.on_accent } else { THEME.text_muted }),
+                    Style::default().fg(if selected {
+                        THEME.on_accent
+                    } else {
+                        THEME.text_muted
+                    }),
                 ),
                 Span::styled(
                     opt.clone(),
@@ -1531,7 +1624,11 @@ impl TuiApp {
                     "{}Type your own answer: ",
                     if custom_selected { "> " } else { "  " }
                 ),
-                Style::default().fg(if custom_selected { THEME.on_accent } else { THEME.text_muted }),
+                Style::default().fg(if custom_selected {
+                    THEME.on_accent
+                } else {
+                    THEME.text_muted
+                }),
             ),
             Span::styled(
                 custom_display,
@@ -1564,9 +1661,9 @@ impl TuiApp {
         } else if self.todo_focus {
             " ↑/↓ move · Space toggle · d delete · [ ] resize · Tab/Esc back to input "
         } else if self.streaming {
-            " Esc / Ctrl+C: stop · mouse wheel: scroll · click tool header: expand/collapse "
+            " Ctrl+Q: quit · Esc/Ctrl+C: stop · F6/F8: mouse · Shift+Tab: perm · mouse wheel: scroll · click tool header: expand/collapse "
         } else {
-            " Enter: send · Shift+Enter: newline · ↑/↓: history · Tab: model · Shift+Tab: perm · Ctrl+T: todos · /help "
+            " Enter: send · Shift+Enter: newline · ↑/↓: history · Shift+Tab: perm · Ctrl+T: todos · F6/F8: mouse · Ctrl+Q: quit · /help "
         };
 
         let total = format_number(self.tokens_total);
@@ -1575,19 +1672,32 @@ impl TuiApp {
         } else {
             0
         };
-        let mut info = format!("{total} tokens · {pct}% used · perm: {}", self.permission_mode);
+        let mouse_state = if self.mouse_enabled { "on" } else { "off" };
+        let mut info = format!(
+            "{total} tokens · {pct}% used · perm: {} · mouse: {mouse_state}",
+            self.permission_mode
+        );
         if self.total_cost > 0.0 {
             info.push_str(&format!(" · ${:.2}", self.total_cost));
         }
 
-        let pad = width.saturating_sub(key_hint.len() as u16).saturating_sub(info.len() as u16 + 2);
-        let mut spans = vec![Span::styled(key_hint, Style::default().fg(THEME.text_muted))];
+        let pad = width
+            .saturating_sub(key_hint.len() as u16)
+            .saturating_sub(info.len() as u16 + 2);
+        let mut spans = vec![Span::styled(
+            key_hint,
+            Style::default().fg(THEME.text_muted),
+        )];
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad as usize), Style::default()));
         }
         spans.push(Span::styled(
             info,
-            Style::default().fg(if self.tokens_total > 0 { THEME.success } else { THEME.text_muted }),
+            Style::default().fg(if self.tokens_total > 0 {
+                THEME.success
+            } else {
+                THEME.text_muted
+            }),
         ));
         Line::from(spans)
     }
@@ -1597,6 +1707,7 @@ impl TuiApp {
         let help_text = vec![
             "/help      - Show this help",
             "/model     - Show or set model (/model gpt-4o)",
+            "/mode      - Set permission mode (/mode ask|allow|plan)",
             "/tools     - List available tools",
             "/new       - Start a fresh session",
             "/compact   - Summarize older messages",
@@ -1605,6 +1716,8 @@ impl TuiApp {
             "/parallel  - Run parallel tasks (/parallel task1; task2)",
             "/ssh       - SSH commands (/ssh list, /ssh connect <alias>)",
             "/todo      - Toggle the todo panel (/todo add <task>, /todo clear)",
+            "/mouse     - Toggle interactive mouse mode (F6 or F8)",
+            "/workspace - Toggle workspace path restriction",
             "/resume    - Resume last session",
             "/skills    - List loaded skills",
             "/quit      - Exit",
@@ -1659,8 +1772,7 @@ impl TuiApp {
     }
 
     fn resize_todo_panel(&mut self, delta: i16) {
-        self.todo_panel_pct =
-            (self.todo_panel_pct as i16 + delta).clamp(15, 55) as u16;
+        self.todo_panel_pct = (self.todo_panel_pct as i16 + delta).clamp(15, 55) as u16;
     }
 
     fn toggle_todo_at(&mut self, idx: usize) {
@@ -1772,6 +1884,38 @@ enum CommandOutcome {
     Quit,
 }
 
+fn start_inflight(
+    agent: &std::sync::Arc<Agent>,
+    session: &Session,
+    prompt: String,
+    approval_resp_tx: &mut Option<UnboundedSender<bool>>,
+    options_resp_tx: &mut Option<UnboundedSender<String>>,
+) -> InFlight {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+    let (options_tx, options_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    *approval_resp_tx = Some(approval_tx);
+    *options_resp_tx = Some(options_tx);
+    let agent_clone = agent.clone();
+    let session_snapshot = session.clone();
+    let handle = tokio::spawn(async move {
+        let mut s = session_snapshot;
+        let result = agent_clone
+            .run_turn(
+                &mut s,
+                prompt,
+                Some(tx),
+                Interactivity::new(
+                    ApprovalGate::new(approval_rx),
+                    OptionsGate::new(options_rx),
+                ),
+            )
+            .await;
+        (s, result)
+    });
+    InFlight { handle, rx }
+}
+
 fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
     match event {
         AgentEvent::Thinking => {
@@ -1811,7 +1955,11 @@ fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
             });
             app.pending_tool_cards.push_back(card_idx);
         }
-        AgentEvent::ToolCallEnd { name, output, is_error } => {
+        AgentEvent::ToolCallEnd {
+            name,
+            output,
+            is_error,
+        } => {
             app.end_stream();
             if let Some(card_idx) = app.pending_tool_cards.pop_front() {
                 let body = format_tool_body(&name, &output, is_error);
@@ -1820,8 +1968,9 @@ fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
                     card.completed = true;
                     card.is_error = is_error;
                     card.body_end = app.output_text.len();
-                    let line_count =
-                        app.output_text[card.body_start..card.body_end].lines().count();
+                    let line_count = app.output_text[card.body_start..card.body_end]
+                        .lines()
+                        .count();
                     if line_count > TOOL_CARD_COLLAPSE_THRESHOLD {
                         card.collapsed = true;
                         let glyph = "▸";
@@ -1834,7 +1983,10 @@ fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
             }
             app.trim_output_if_needed();
         }
-        AgentEvent::ApprovalRequest { tool_name, arguments } => {
+        AgentEvent::ApprovalRequest {
+            tool_name,
+            arguments,
+        } => {
             app.end_stream();
             let args_short = truncate_str(&arguments, 120);
             let is_plan = app.permission_mode == "plan";
@@ -1887,7 +2039,11 @@ fn apply_agent_event(app: &mut TuiApp, event: AgentEvent) -> bool {
                 Style::default().fg(THEME.error),
             );
         }
-        AgentEvent::TokenUsage { prompt, completion, total } => {
+        AgentEvent::TokenUsage {
+            prompt,
+            completion,
+            total,
+        } => {
             app.last_usage = Some((prompt, completion, total));
             app.tokens_total = total as u64;
             if let Some((in_price, out_price)) = app.model_price {
@@ -1918,7 +2074,9 @@ fn format_tool_body(name: &str, output: &str, is_error: bool) -> String {
     if is_error {
         body.push_str(&format!("  ✖ {name} failed: {output}\n"));
     } else if line_count > 1 {
-        body.push_str(&format!("  ✔ {name} completed ({line_count} lines of output)\n"));
+        body.push_str(&format!(
+            "  ✔ {name} completed ({line_count} lines of output)\n"
+        ));
         for line in output.lines() {
             body.push_str("  ");
             body.push_str(line);
@@ -1961,11 +2119,8 @@ async fn finish_inflight(
     }
 
     // Never block the UI forever if the agent task stalls after Done.
-    let join_result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        &mut in_flight.handle,
-    )
-    .await;
+    let join_result =
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut in_flight.handle).await;
 
     match join_result {
         Ok(Ok((updated_session, result))) => {
@@ -1973,6 +2128,11 @@ async fn finish_inflight(
                 apply_agent_event(app, event);
             }
             *session = updated_session;
+            // The returned session is authoritative for agent-managed todos.
+            // Keep the side panel in sync even if the TodoUpdate event was
+            // delivered before the agent task completed.
+            app.todos = session.todos.clone();
+            app.todo_selected = app.todo_selected.min(app.todos.len().saturating_sub(1));
             if let Err(e) = result {
                 app.push_output(&format!("Error: {e}"), Style::default().fg(THEME.error));
             }
@@ -2007,8 +2167,8 @@ pub async fn run_tui(
 ) -> Result<()> {
     use crossterm::{
         event::{
-            DisableBracketedPaste, EnableBracketedPaste,
-            Event, EventStream, KeyCode, KeyEventKind, KeyModifiers,
+            DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEventKind,
+            KeyModifiers,
         },
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -2017,11 +2177,7 @@ pub async fn run_tui(
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableBracketedPaste
-    )?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
     // Full clear so we start with a known terminal state.
@@ -2031,9 +2187,11 @@ pub async fn run_tui(
     app.provider = agent.provider_name();
     app.context_window = agent.context_window();
     app.permission_mode = agent.permission_mode();
+    app.restrict_to_workspace = agent.restrict_to_workspace();
     app.model_price = agent.pricing();
     app.total_cost = agent.total_cost();
     let mut in_flight: Option<InFlight> = None;
+    let mut queued_prompts: VecDeque<String> = VecDeque::new();
     // UI -> agent channel for interactive tool approvals (recreated per turn).
     let mut approval_resp_tx: Option<UnboundedSender<bool>> = None;
     // UI -> agent channel for options-picker responses (recreated per turn).
@@ -2081,13 +2239,28 @@ pub async fn run_tui(
                     },
                 )
                 .await;
+                if let Some(prompt) = queued_prompts.pop_front() {
+                    app.ensure_newline();
+                    app.output_text.push_str("> ");
+                    app.output_text.push_str(&prompt);
+                    app.output_text.push('\n');
+                    app.status = "thinking...".into();
+                    app.streaming = true;
+                    in_flight = Some(start_inflight(
+                        &agent,
+                        session,
+                        prompt,
+                        &mut approval_resp_tx,
+                        &mut options_resp_tx,
+                    ));
+                }
                 // Resync ratatui's diff buffer if anything wrote to the tty mid-turn.
                 let _ = terminal.clear();
                 continue;
             }
         }
 
-                tokio::select! {
+        tokio::select! {
             maybe = events.next() => {
                 match maybe {
                     Some(Ok(event)) => {
@@ -2149,14 +2322,14 @@ pub async fn run_tui(
                                             }
                                             app.is_selecting_mouse = true;
                                             app.selection = Some((char_idx, char_idx));
-                                            
+
                                             let now = Instant::now();
                                             let is_multi_click = if let Some((last_time, last_char_idx)) = app.double_click_state {
                                                 now.duration_since(last_time).as_millis() < 400 && last_char_idx == char_idx
                                             } else {
                                                 false
                                             };
-                                            
+
                                             if is_multi_click {
                                                 match app.last_click_type {
                                                     ClickType::Single => {
@@ -2200,23 +2373,13 @@ pub async fn run_tui(
                                         }
                                     }
                                     crossterm::event::MouseEventKind::ScrollUp => {
-                                        let scroll_y = app.output_scroll_y(app.last_output_area.get().width, app.last_output_area.get().height);
-                                        app.scroll_offset = Some(scroll_y.saturating_sub(2));
+                                        if app.output_contains(mouse_event.column, mouse_event.row) {
+                                            app.scroll_output_by(-3);
+                                        }
                                     }
                                     crossterm::event::MouseEventKind::ScrollDown => {
-                                        let area = app.last_output_area.get();
-                                        let scroll_y = app.output_scroll_y(area.width, area.height);
-                                        let inner_width = area.width.saturating_sub(2);
-                                        let inner_height = area.height.saturating_sub(2);
-                                        let total_lines = app
-                                            .wrapped_line_count(inner_width as usize)
-                                            .min(u16::MAX as usize) as u16;
-                                        let max_scroll = total_lines.saturating_sub(inner_height);
-                                        let next_scroll = scroll_y + 2;
-                                        if next_scroll >= max_scroll {
-                                            app.scroll_offset = None;
-                                        } else {
-                                            app.scroll_offset = Some(next_scroll);
+                                        if app.output_contains(mouse_event.column, mouse_event.row) {
+                                            app.scroll_output_by(3);
                                         }
                                     }
                                     _ => {}
@@ -2225,10 +2388,48 @@ pub async fn run_tui(
                             continue;
                         }
 
-                        let Event::Key(key) = event else {
-                            continue;
-                        };
-                        if key.kind != KeyEventKind::Press {
+            let Event::Key(key) = event else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            // Always leave promptly, including while an approval or options
+            // prompt is waiting for a response.
+            if key.code == KeyCode::Char('q')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                should_quit = true;
+                continue;
+            }
+
+            // Toggle terminal mouse capture. When disabled, the terminal
+            // receives the mouse so normal drag-select and copy work; when
+            // enabled, the TUI handles clicks, scrolling, and selection.
+            if matches!(key.code, KeyCode::F(6) | KeyCode::F(8))
+            {
+                app.mouse_enabled = !app.mouse_enabled;
+                app.selection = None;
+                app.is_selecting_mouse = false;
+                let state = if app.mouse_enabled {
+                    "interactive"
+                } else {
+                    "terminal select/copy"
+                };
+                app.push_output(
+                    &format!("✔ Mouse mode: {state}"),
+                    Style::default().fg(THEME.warning),
+                );
+                continue;
+            }
+
+                        // Terminals commonly report Shift+Tab as BackTab.
+                        if key.code == KeyCode::BackTab
+                            || (key.code == KeyCode::Tab
+                                && key.modifiers.contains(KeyModifiers::SHIFT))
+                        {
+                            app.cycle_permission(&agent);
                             continue;
                         }
 
@@ -2344,6 +2545,12 @@ pub async fn run_tui(
                         }
 
                         match key.code {
+                            KeyCode::PageUp => {
+                                app.scroll_output_by(-10);
+                            }
+                            KeyCode::PageDown => {
+                                app.scroll_output_by(10);
+                            }
                             // Todo panel navigation (panel has focus).
                             KeyCode::Up if app.todo_focus => {
                                 if app.todo_selected > 0 {
@@ -2443,7 +2650,7 @@ pub async fn run_tui(
                             KeyCode::Left => {
                                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                                 let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                                
+
                                 if shift {
                                     if app.input_selection_start.is_none() {
                                         app.input_selection_start = Some(app.input_cursor_idx);
@@ -2451,7 +2658,7 @@ pub async fn run_tui(
                                 } else {
                                     app.input_selection_start = None;
                                 }
-                                
+
                                 if ctrl {
                                     let chars: Vec<char> = app.input.chars().collect();
                                     while app.input_cursor_idx > 0 && app.input_cursor_idx <= chars.len() {
@@ -2466,7 +2673,7 @@ pub async fn run_tui(
                                 let chars_len = app.input.chars().count();
                                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                                 let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                                
+
                                 if shift {
                                     if app.input_selection_start.is_none() {
                                         app.input_selection_start = Some(app.input_cursor_idx);
@@ -2474,7 +2681,7 @@ pub async fn run_tui(
                                 } else {
                                     app.input_selection_start = None;
                                 }
-                                
+
                                 if ctrl {
                                     let chars: Vec<char> = app.input.chars().collect();
                                     while app.input_cursor_idx < chars_len {
@@ -2553,11 +2760,6 @@ pub async fn run_tui(
                                     continue;
                                 }
 
-                                if in_flight.is_some() {
-                                    app.status = "busy — wait for response...".into();
-                                    continue;
-                                }
-
                                 let input = app.input.trim().to_string();
                                 app.input.clear();
                                 app.input_cursor_idx = 0;
@@ -2565,6 +2767,16 @@ pub async fn run_tui(
                                 if input.is_empty() {
                                     continue;
                                 }
+
+                                if in_flight.is_some() {
+                                    queued_prompts.push_back(input);
+                                    app.status = format!(
+                                        "queued command ({}) — waiting for current turn",
+                                        queued_prompts.len()
+                                    );
+                                    continue;
+                                }
+
                                 app.push_history(&input);
 
                                 if input.starts_with("/") {
@@ -2593,34 +2805,14 @@ pub async fn run_tui(
                                 app.output_text.push('\n');
                                 app.status = "thinking...".into();
 
-                                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                                let (approval_tx, approval_rx) =
-                                    tokio::sync::mpsc::unbounded_channel::<bool>();
-                                let (options_tx, options_rx) =
-                                    tokio::sync::mpsc::unbounded_channel::<String>();
-                                approval_resp_tx = Some(approval_tx);
-                                options_resp_tx = Some(options_tx);
-                                let agent_clone = agent.clone();
-                                let user_msg = input.clone();
-                                let session_snapshot = session.clone();
-                                let handle = tokio::spawn(async move {
-                                    let mut s = session_snapshot;
-                                    let result = agent_clone
-                                        .run_turn(
-                                            &mut s,
-                                            user_msg,
-                                            Some(tx),
-                                            Interactivity::new(
-                                                ApprovalGate::new(approval_rx),
-                                                OptionsGate::new(options_rx),
-                                            ),
-                                        )
-                                        .await;
-                                    (s, result)
-                                });
-
                                 app.streaming = true;
-                                in_flight = Some(InFlight { handle, rx });
+                                in_flight = Some(start_inflight(
+                                    &agent,
+                                    session,
+                                    input,
+                                    &mut approval_resp_tx,
+                                    &mut options_resp_tx,
+                                ));
                             }
                             KeyCode::Up => {
                                 if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -2751,6 +2943,28 @@ async fn handle_slash_command(
                 }
             }
         }
+        SlashCommand::Mode(args) => {
+            let Some(mode) = args else {
+                app.push_output(
+                    &format!("Permission mode: {} (ask|allow|plan)", app.permission_mode),
+                    Style::default().fg(THEME.warning),
+                );
+                return Ok(CommandOutcome::Continue);
+            };
+            if !matches!(mode.as_str(), "ask" | "allow" | "plan") {
+                app.push_output(
+                    "Usage: /mode ask|allow|plan",
+                    Style::default().fg(THEME.error),
+                );
+            } else {
+                agent.set_permission_mode(&mode);
+                app.permission_mode = mode.clone();
+                app.push_output(
+                    &format!("Permission mode: {mode}"),
+                    Style::default().fg(THEME.success),
+                );
+            }
+        }
         SlashCommand::Tools => {
             let tools = agent.tool_names().join(", ");
             app.push_output(&format!("Tools: {tools}"), Style::default().fg(THEME.info));
@@ -2791,11 +3005,8 @@ async fn handle_slash_command(
                 );
                 app.status = "parallel...".into();
 
-                let executor = forge_parallel::ParallelExecutor::new(
-                    agent.clone(),
-                    workspace,
-                    agent.model(),
-                );
+                let executor =
+                    forge_parallel::ParallelExecutor::new(agent.clone(), workspace, agent.model());
                 match executor.run_parallel(tasks).await {
                     Ok(results) => {
                         for task in results {
@@ -2832,7 +3043,11 @@ async fn handle_slash_command(
         SlashCommand::Todo(args) => {
             if args.is_empty() {
                 app.toggle_todo_panel();
-                let state = if app.show_todo_panel { "shown" } else { "hidden" };
+                let state = if app.show_todo_panel {
+                    "shown"
+                } else {
+                    "hidden"
+                };
                 app.push_output(
                     &format!("Todo panel {state} (Ctrl+T toggles)"),
                     Style::default().fg(THEME.warning),
@@ -2889,9 +3104,25 @@ async fn handle_slash_command(
         }
         SlashCommand::ToggleMouse => {
             app.mouse_enabled = !app.mouse_enabled;
-            let state = if app.mouse_enabled { "enabled" } else { "disabled" };
+            let state = if app.mouse_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
             app.push_output(
                 &format!("✔ Mouse capture and app-owned text selection {}", state),
+                Style::default().fg(THEME.warning),
+            );
+        }
+        SlashCommand::ToggleWorkspaceRestriction => {
+            app.restrict_to_workspace = agent.toggle_restrict_to_workspace();
+            let state = if app.restrict_to_workspace {
+                "restricted to workspace"
+            } else {
+                "workspace restriction disabled"
+            };
+            app.push_output(
+                &format!("✔ File path mode: {state}"),
                 Style::default().fg(THEME.warning),
             );
         }

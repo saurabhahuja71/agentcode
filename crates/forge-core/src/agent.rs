@@ -71,12 +71,7 @@ impl ApprovalGate {
 
     /// Emit an `ApprovalRequest` event, then block until the operator answers.
     /// Returns `true` when the call may proceed.
-    pub async fn ask(
-        &self,
-        tool_name: &str,
-        arguments: &str,
-        emit: &impl Fn(AgentEvent),
-    ) -> bool {
+    pub async fn ask(&self, tool_name: &str, arguments: &str, emit: &impl Fn(AgentEvent)) -> bool {
         let Some(rx) = &self.inner else {
             return true;
         };
@@ -175,7 +170,7 @@ impl From<&ForgeConfig> for RuntimeAgentConfig {
             Some(m) if m == "plan" => "plan".to_string(),
             Some(m) => m.clone(),
             None if config.agent.full_auto => "allow".to_string(),
-            None => "ask".to_string(),
+            None => "allow".to_string(),
         };
         Self {
             model: config.agent.model.clone(),
@@ -273,6 +268,14 @@ impl Agent {
         self.tools.names()
     }
 
+    pub fn restrict_to_workspace(&self) -> bool {
+        self.tools.restrict_to_workspace()
+    }
+
+    pub fn toggle_restrict_to_workspace(&self) -> bool {
+        self.tools.toggle_restrict_to_workspace()
+    }
+
     pub async fn run_turn(
         &self,
         session: &mut Session,
@@ -340,7 +343,11 @@ impl Agent {
                 total: response.usage.total_tokens,
             });
 
-            let Message::Assistant { content, tool_calls } = response.message else {
+            let Message::Assistant {
+                content,
+                tool_calls,
+            } = response.message
+            else {
                 emit(AgentEvent::Error {
                     message: "unexpected non-assistant response".into(),
                 });
@@ -481,8 +488,7 @@ impl Agent {
         if call.function.name != "shell" {
             return false;
         }
-        let args: Value =
-            serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+        let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
         let command = args["command"].as_str().unwrap_or("");
         is_destructive_command(command)
     }
@@ -522,9 +528,9 @@ impl Agent {
 
             // Interactive tools are handled inline (they may block on the UI).
             if name == "ask_options" {
-                let outcome =
-                    self.execute_options_call(call, &args_str, emit, &interactivity.options)
-                        .await;
+                let outcome = self
+                    .execute_options_call(call, &args_str, emit, &interactivity.options)
+                    .await;
                 let output = outcome.0;
                 let is_error = outcome.1;
                 emit(AgentEvent::ToolCallEnd {
@@ -551,8 +557,11 @@ impl Agent {
             }
 
             let plan_mode = self.config.read().permission_mode == "plan";
+            let permission_mode = self.config.read().permission_mode.clone();
             let needs_check = if plan_mode {
                 !Self::is_read_only_tool(&name)
+            } else if permission_mode == "allow" {
+                false
             } else {
                 self.requires_approval(call)
             };
@@ -582,8 +591,7 @@ impl Agent {
             });
 
             let args: Value = serde_json::from_str(&args_str).unwrap_or(Value::Null);
-            self.hooks
-                .emit(&HookContext::pre_tool(&name, args.clone()));
+            self.hooks.emit(&HookContext::pre_tool(&name, args.clone()));
 
             let tools = self.tools.clone();
             let hooks = self.hooks.clone();
@@ -639,7 +647,10 @@ impl Agent {
         });
 
         let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
-        let prompt = args["prompt"].as_str().unwrap_or("Choose an option").to_string();
+        let prompt = args["prompt"]
+            .as_str()
+            .unwrap_or("Choose an option")
+            .to_string();
         let options_list: Vec<String> = args["options"]
             .as_array()
             .map(|a| {
@@ -744,7 +755,9 @@ impl Agent {
                     format!("todos:\n{}", lines.join("\n"))
                 }
             }
-            other => format!("todo: unknown op '{other}' (add|complete|reopen|remove|update|clear|list)"),
+            other => {
+                format!("todo: unknown op '{other}' (add|complete|reopen|remove|update|clear|list)")
+            }
         };
 
         emit(AgentEvent::TodoUpdate {
@@ -876,8 +889,7 @@ impl Agent {
 
                     if content.is_empty() {
                         if let Message::Assistant {
-                            content: Some(c),
-                            ..
+                            content: Some(c), ..
                         } = resp.message.clone()
                         {
                             if !c.is_empty() {
@@ -889,8 +901,16 @@ impl Agent {
 
                     return Ok(forge_provider::ChatResponse {
                         message: Message::Assistant {
-                            content: if content.is_empty() { None } else { Some(content) },
-                            tool_calls: if final_tool_calls.is_empty() { None } else { Some(final_tool_calls) },
+                            content: if content.is_empty() {
+                                None
+                            } else {
+                                Some(content)
+                            },
+                            tool_calls: if final_tool_calls.is_empty() {
+                                None
+                            } else {
+                                Some(final_tool_calls)
+                            },
                         },
                         finish_reason: resp.finish_reason,
                         usage: resp.usage,

@@ -1,0 +1,48 @@
+# Forge + SGLang on 10.0.10.192 (heavyinstance2)
+# Higher quality / multi-user — AWQ INT4 or BF16 safetensors
+# Avoid KAT FP8 on A10 completely
+# Use: forge --config config.sglang-hq.toml  (alias: forge-sh)
+
+[agent]
+model = "darwin-35b-a3b-opus"
+temperature = 0.15
+max_tokens = 4096
+max_turns = 50
+full_auto = false
+system_prompt = "You are Forge, a precise and capable coding agent. Prefer tools (read, search, shell, edit) over guessing. Use shell/list for real filesystem state."
+
+[[providers]]
+name = "sglang-hq"
+kind = "openai_compatible"
+# SGLang on 10.0.10.192 — AWQ INT4 or BF16 safetensors (no FP8)
+base_url = "http://10.0.10.192:30000"
+api_key = "sglang"
+models = []
+enabled = true
+priority = 1
+
+[[providers]]
+name = "ollama-fallback"
+kind = "ollama"
+base_url = "http://10.0.10.219:11434"
+models = ["darwin-35b-a3b-opus:q4_k_m"]
+enabled = true
+priority = 20
+
+[safety]
+workspace_trust_required = true
+restrict_to_workspace = true
+confirm_destructive = true
+audit_log = true
+
+[tools]
+file_tools = true
+shell = true
+git = true
+search = true
+shell_timeout_secs = 120
+
+[session]
+auto_save = true
+context_window = 65536
+summarize_threshold = 55000

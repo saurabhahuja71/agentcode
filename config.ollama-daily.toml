@@ -1,0 +1,37 @@
+# Forge + Ollama on 10.0.10.219
+# Daily coding agent — GGUF Q4_K_M / Q5_K_M (just works)
+# Use: forge --config config.ollama-daily.toml  (alias: forge-od)
+
+[agent]
+model = "darwin-35b-a3b-opus:q4_k_m"
+temperature = 0.2
+max_tokens = 4096
+max_turns = 50
+full_auto = false
+system_prompt = "You are Forge, a precise and capable coding agent. Prefer tools (read, search, shell, edit) over guessing. Use shell/list for real filesystem state."
+
+[[providers]]
+name = "ollama"
+kind = "ollama"
+base_url = "http://127.0.0.1:11435"
+models = ["darwin-35b-a3b-opus:q4_k_m", "veriloop-coder-e1:latest", "qwen3-coder:30b", "qwen2.5-coder:32b"]
+enabled = true
+priority = 1
+
+[safety]
+workspace_trust_required = true
+restrict_to_workspace = true
+confirm_destructive = true
+audit_log = true
+
+[tools]
+file_tools = true
+shell = true
+git = true
+search = true
+shell_timeout_secs = 120
+
+[session]
+auto_save = true
+context_window = 32768
+summarize_threshold = 28000

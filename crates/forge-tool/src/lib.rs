@@ -43,6 +43,7 @@ pub trait Tool: Send + Sync {
 
 pub mod file;
 pub mod git;
+pub mod http;
 pub mod index;
 pub mod interactive;
 pub mod outline;

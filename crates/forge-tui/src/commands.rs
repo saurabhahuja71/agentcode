@@ -2,6 +2,7 @@
 pub enum SlashCommand {
     Help,
     Model(Option<String>),
+    Mode(Option<String>),
     Tools,
     Clear,
     New,
@@ -14,6 +15,7 @@ pub enum SlashCommand {
     Skills,
     Quit,
     ToggleMouse,
+    ToggleWorkspaceRestriction,
     Unknown(String),
 }
 
@@ -32,6 +34,7 @@ impl SlashCommand {
         match parts[0] {
             "help" => SlashCommand::Help,
             "model" => SlashCommand::Model(parts.get(1).map(|s| s.to_string())),
+            "mode" => SlashCommand::Mode(parts.get(1).map(|s| s.to_string())),
             "tools" => SlashCommand::Tools,
             "clear" => SlashCommand::Clear,
             "new" => SlashCommand::New,
@@ -57,6 +60,7 @@ impl SlashCommand {
             "resume" => SlashCommand::Resume,
             "skills" => SlashCommand::Skills,
             "toggle-mouse" | "mouse" => SlashCommand::ToggleMouse,
+            "workspace" | "toggle-workspace" => SlashCommand::ToggleWorkspaceRestriction,
             "quit" | "exit" => SlashCommand::Quit,
             other => SlashCommand::Unknown(other.to_string()),
         }
@@ -87,13 +91,15 @@ mod tests {
 
     #[test]
     fn parses_exit_command() {
-        assert!(matches!(
-            SlashCommand::parse("/exit"),
-            SlashCommand::Quit
-        ));
-        assert!(matches!(
-            SlashCommand::parse("/quit"),
-            SlashCommand::Quit
-        ));
+        assert!(matches!(SlashCommand::parse("/exit"), SlashCommand::Quit));
+        assert!(matches!(SlashCommand::parse("/quit"), SlashCommand::Quit));
+    }
+
+    #[test]
+    fn parses_permission_mode() {
+        match SlashCommand::parse("/mode plan") {
+            SlashCommand::Mode(Some(mode)) => assert_eq!(mode, "plan"),
+            _ => panic!("expected mode command"),
+        }
     }
 }

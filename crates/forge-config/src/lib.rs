@@ -71,7 +71,7 @@ pub struct SafetyConfig {
     pub workspace_trust_required: bool,
     #[serde(default = "default_allowed_commands")]
     pub allowed_commands: Vec<String>,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub restrict_to_workspace: bool,
     #[serde(default = "default_true")]
     pub confirm_destructive: bool,
@@ -91,6 +91,9 @@ pub struct ToolsConfig {
     pub git: bool,
     #[serde(default = "default_true")]
     pub search: bool,
+    /// Enable the bounded HTTP client tool for API and endpoint checks.
+    #[serde(default = "default_true")]
+    pub http: bool,
     #[serde(default)]
     pub skills_dir: Option<PathBuf>,
     #[serde(default = "default_shell_timeout")]
@@ -163,6 +166,9 @@ fn default_max_turns() -> u32 {
 }
 fn default_true() -> bool {
     true
+}
+fn default_false() -> bool {
+    false
 }
 fn default_provider_kind() -> ProviderKind {
     ProviderKind::OpenAiCompatible
@@ -338,7 +344,7 @@ impl Default for SafetyConfig {
         Self {
             workspace_trust_required: true,
             allowed_commands: default_allowed_commands(),
-            restrict_to_workspace: true,
+            restrict_to_workspace: false,
             confirm_destructive: true,
             audit_log: true,
             audit_log_path: None,
@@ -353,6 +359,7 @@ impl Default for ToolsConfig {
             shell: true,
             git: true,
             search: true,
+            http: true,
             skills_dir: None,
             shell_timeout_secs: default_shell_timeout(),
         }

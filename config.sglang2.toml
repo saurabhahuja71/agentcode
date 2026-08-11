@@ -1,6 +1,7 @@
-# Forge + SGLang (local tunnel :30000 on heavyinstance)
-# Use with: forge-sglang  (alias: forge-s)
-# Prereq: sglang-up  OR  sglang-tunnel (if server already running)
+# Forge (agentcode) + SGLang on heavyinstance2
+# Tunnel: sglang2-tunnel → http://127.0.0.1:30002
+# Use: agentcode-s2 | forge-s2  (default model Darwin-9B-Opus HF)
+# Qwen GGUF fallback: sglang2-use-qwen then set model / use coder config
 
 [agent]
 model = "Darwin-9B-Opus"
@@ -8,12 +9,13 @@ temperature = 0.2
 max_tokens = 4096
 max_turns = 50
 full_auto = false
-system_prompt = "You are Forge, a precise and capable coding agent. Use tools to read, search, edit, and execute code."
+system_prompt = "You are Forge, a precise and capable coding agent. Prefer tools (read, search, shell, edit) over guessing. Use shell/list for real filesystem state."
 
 [[providers]]
 name = "sglang"
 kind = "openai_compatible"
-base_url = "http://127.0.0.1:30000"
+# forge-provider appends /v1/chat/completions
+base_url = "http://127.0.0.1:30002"
 api_key = "sglang"
 models = []
 enabled = true
@@ -32,7 +34,6 @@ workspace_trust_required = true
 restrict_to_workspace = true
 confirm_destructive = true
 audit_log = true
-# Uses default allowed_commands (podman, docker, systemctl, journalctl, ssh, etc.)
 
 [tools]
 file_tools = true
