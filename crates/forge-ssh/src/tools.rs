@@ -18,6 +18,11 @@ pub struct RemoteListDirTool {
     manager: Arc<SshManager>,
 }
 
+pub struct SshExecuteTool {
+    manager: Arc<SshManager>,
+    allowed_commands: Vec<String>,
+}
+
 impl RemoteExecTool {
     pub fn new(manager: Arc<SshManager>, allowed_commands: Vec<String>) -> Self {
         Self {
@@ -36,6 +41,59 @@ impl RemoteReadFileTool {
 impl RemoteListDirTool {
     pub fn new(manager: Arc<SshManager>) -> Self {
         Self { manager }
+    }
+}
+
+impl SshExecuteTool {
+    pub fn new(manager: Arc<SshManager>, allowed_commands: Vec<String>) -> Self {
+        Self {
+            manager,
+            allowed_commands,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SshExecuteTool {
+    fn name(&self) -> &str {
+        "ssh_execute"
+    }
+
+    fn description(&self) -> &str {
+        "Execute a command through an SSH alias from ~/.ssh/config. Use this for podman8, podman9, and other configured hosts."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "alias": { "type": "string", "description": "SSH config alias, for example podman8" },
+                "command": { "type": "string", "description": "Command to run on the remote host" }
+            },
+            "required": ["alias", "command"]
+        })
+    }
+
+    async fn execute(&self, arguments: Value) -> Result<ToolResult, ToolError> {
+        let alias = arguments["alias"]
+            .as_str()
+            .or_else(|| arguments["host"].as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("alias required".into()))?;
+        let command = arguments["command"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidArgs("command required".into()))?;
+
+        validate_allowed_command(command, &self.allowed_commands)?;
+        match self.manager.exec_ssh_alias(alias, command).await {
+            Ok(output) => Ok(ToolResult {
+                output,
+                is_error: false,
+            }),
+            Err(e) => Ok(ToolResult {
+                output: e.to_string(),
+                is_error: true,
+            }),
+        }
     }
 }
 
@@ -171,6 +229,10 @@ pub fn register_ssh_tools(
     manager: Arc<SshManager>,
     allowed_commands: Vec<String>,
 ) {
+    registry.register(Arc::new(SshExecuteTool::new(
+        manager.clone(),
+        allowed_commands.clone(),
+    )));
     registry.register(Arc::new(RemoteExecTool::new(
         manager.clone(),
         allowed_commands,

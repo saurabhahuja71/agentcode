@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 pub mod tools;
-pub use tools::{register_ssh_tools, RemoteExecTool, RemoteListDirTool, RemoteReadFileTool};
+pub use tools::{
+    register_ssh_tools, RemoteExecTool, RemoteListDirTool, RemoteReadFileTool, SshExecuteTool,
+};
 
 #[derive(Debug, Error)]
 pub enum SshError {
@@ -95,6 +97,45 @@ impl SshManager {
         }
     }
 
+    /// Execute through the user's OpenSSH config, preserving aliases and
+    /// options such as ProxyJump instead of reconstructing a bare ssh target.
+    pub async fn exec_ssh_alias(&self, alias: &str, command: &str) -> Result<String, SshError> {
+        if alias.is_empty()
+            || alias
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '`'))
+        {
+            return Err(SshError::Connection("invalid SSH alias".into()));
+        }
+
+        let config = std::env::var_os("SSH_CONFIG")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .map(|home| home.join(".ssh/config"))
+            })
+            .ok_or_else(|| SshError::Connection("SSH_CONFIG or HOME is not set".into()))?;
+
+        let output = tokio::process::Command::new("ssh")
+            .arg("-F")
+            .arg(config)
+            .arg(alias)
+            .arg(command)
+            .output()
+            .await
+            .map_err(|e| SshError::Connection(e.to_string()))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{stdout}{stderr}");
+        if output.status.success() {
+            Ok(combined)
+        } else {
+            Err(SshError::Command(combined))
+        }
+    }
+
     pub fn active_sessions(&self) -> Vec<SshSessionInfo> {
         self.sessions.lock().values().cloned().collect()
     }
@@ -105,13 +146,22 @@ impl SshManager {
 }
 
 /// Remote file read via SSH + cat
-pub async fn remote_read_file(manager: &SshManager, alias: &str, path: &str) -> Result<String, SshError> {
+pub async fn remote_read_file(
+    manager: &SshManager,
+    alias: &str,
+    path: &str,
+) -> Result<String, SshError> {
     let output = manager.exec(alias, &format!("cat {path}")).await?;
     Ok(output)
 }
 
 /// Basic port forward via SSH - returns the command to run
-pub fn port_forward_command(host: &SshHostConfig, local_port: u16, remote_host: &str, remote_port: u16) -> String {
+pub fn port_forward_command(
+    host: &SshHostConfig,
+    local_port: u16,
+    remote_host: &str,
+    remote_port: u16,
+) -> String {
     format!(
         "ssh -L {local_port}:{remote_host}:{remote_port} -p {} {}@{}",
         host.port, host.user, host.host

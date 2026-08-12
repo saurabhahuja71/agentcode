@@ -167,16 +167,18 @@ async fn main() -> Result<()> {
     if !mcp_tools.is_empty() {
         tracing::info!(count = mcp_tools.len(), "registered MCP tools");
     }
+    register_ssh_tools(
+        &mut tool_registry,
+        ssh_manager.clone(),
+        config.ssh.allowed_commands.clone(),
+    );
     if !config.ssh.hosts.is_empty() {
-        register_ssh_tools(
-            &mut tool_registry,
-            ssh_manager.clone(),
-            config.ssh.allowed_commands.clone(),
-        );
         tracing::info!(
             count = config.ssh.hosts.len(),
             "registered SSH remote tools"
         );
+    } else {
+        tracing::info!("registered SSH config alias tool");
     }
     let tools = Arc::new(tool_registry);
 
