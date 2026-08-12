@@ -180,6 +180,9 @@ fn default_shell_timeout() -> u64 {
     120
 }
 fn default_session_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("FORGE_SESSION_DIR") {
+        return PathBuf::from(path);
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".forge")
@@ -196,7 +199,7 @@ fn default_system_prompt() -> String {
      Use tools to read, search, edit, and execute code. \
      Tool command arguments must be executable text, never the workspace path; \
      the tool already runs in its configured working directory. \
-     For remote work, use a literal ssh command and report raw stdout/stderr. \
+     For remote work, call the ssh_execute tool with the numeric SSH config alias and literal command; never substitute local shell or literal ssh. Return raw stdout/stderr. \
      When reading the user's shell configuration, first inspect the active HOME \
      with the shell and read \"$HOME/.bashrc\"; never assume a root home or use \
      a hardcoded user path. For Podman lifecycle work, use plain podman output \
