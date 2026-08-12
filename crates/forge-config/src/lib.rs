@@ -402,6 +402,9 @@ impl Default for McpConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn available_models_deduplicates_and_includes_agent_default() {
@@ -459,14 +462,52 @@ mod tests {
 
         assert_eq!(config.available_models(), vec!["qwen2.5".to_string()]);
     }
+
+    #[test]
+    fn runtime_environment_overrides_configured_state_paths() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let session = std::env::var_os("FORGE_SESSION_DIR");
+        let audit = std::env::var_os("FORGE_AUDIT_LOG_PATH");
+        std::env::set_var("FORGE_SESSION_DIR", "/tmp/forge-test-sessions");
+        std::env::set_var("FORGE_AUDIT_LOG_PATH", "/tmp/forge-test-audit.log");
+
+        let path =
+            std::env::temp_dir().join(format!("forge-config-test-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "[session]\nstorage_dir = \"/home/readonly/.forge/sessions\"\n[safety]\naudit_log_path = \"/home/readonly/.forge/audit.log\"\n",
+        )
+        .unwrap();
+        let config = ForgeConfig::load(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(
+            config.session.storage_dir,
+            PathBuf::from("/tmp/forge-test-sessions")
+        );
+        assert_eq!(
+            config.safety.audit_log_path,
+            Some(PathBuf::from("/tmp/forge-test-audit.log"))
+        );
+
+        match session {
+            Some(value) => std::env::set_var("FORGE_SESSION_DIR", value),
+            None => std::env::remove_var("FORGE_SESSION_DIR"),
+        }
+        match audit {
+            Some(value) => std::env::set_var("FORGE_AUDIT_LOG_PATH", value),
+            None => std::env::remove_var("FORGE_AUDIT_LOG_PATH"),
+        }
+    }
 }
 
 impl ForgeConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
-        let config: Self = toml::from_str(&content)
+        let mut config: Self = toml::from_str(&content)
             .with_context(|| format!("parsing config {}", path.display()))?;
+        config.apply_environment_overrides();
         Ok(config)
     }
 
@@ -480,7 +521,9 @@ impl ForgeConfig {
         if default_path.exists() {
             return Self::load(&default_path);
         }
-        Ok(Self::default())
+        let mut config = Self::default();
+        config.apply_environment_overrides();
+        Ok(config)
     }
 
     pub fn default_config_path() -> PathBuf {
@@ -488,6 +531,18 @@ impl ForgeConfig {
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".forge")
             .join("config.toml")
+    }
+
+    /// Apply launcher-provided writable runtime paths after loading the file.
+    /// This must happen after deserialization so S2 configs cannot force state
+    /// back into a read-only home directory.
+    fn apply_environment_overrides(&mut self) {
+        if let Some(path) = std::env::var_os("FORGE_SESSION_DIR") {
+            self.session.storage_dir = PathBuf::from(path);
+        }
+        if let Some(path) = std::env::var_os("FORGE_AUDIT_LOG_PATH") {
+            self.safety.audit_log_path = Some(PathBuf::from(path));
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
