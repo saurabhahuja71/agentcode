@@ -11,10 +11,14 @@ pub struct WorkspaceTrust {
 
 impl WorkspaceTrust {
     pub fn new() -> Self {
-        let trust_file = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".forge")
-            .join("trusted_workspaces");
+        let trust_file = std::env::var_os("FORGE_TRUST_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".forge")
+                    .join("trusted_workspaces")
+            });
         let trusted = if trust_file.exists() {
             std::fs::read_to_string(&trust_file)
                 .unwrap_or_default()
