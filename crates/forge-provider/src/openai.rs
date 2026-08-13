@@ -204,6 +204,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             max_tokens: request.max_tokens,
             stream: true,
         };
+        tracing::debug!(model = %request.model, tool_count = request.tools.len(), message_count = request.messages.len(), "sending streaming chat request");
 
         let mut req = self.client.post(&url).json(&body);
         if let Some(key) = &self.api_key {
@@ -258,7 +259,11 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 continue;
             }
             match serde_json::from_str::<StreamChunk>(data) {
-                Ok(chunk) => events.extend(parse_stream_chunk(chunk)),
+                Ok(chunk) => {
+                    let parsed = parse_stream_chunk(chunk);
+                    tracing::debug!(event_count = parsed.len(), "parsed streaming response chunk");
+                    events.extend(parsed);
+                }
                 Err(e) => events.push(StreamEvent::Error(format!("parse error: {e}"))),
             }
         }
