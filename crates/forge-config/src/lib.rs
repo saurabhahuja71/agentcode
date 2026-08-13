@@ -96,6 +96,10 @@ pub struct ToolsConfig {
     pub http: bool,
     #[serde(default)]
     pub skills_dir: Option<PathBuf>,
+    /// Append loaded skills to the system prompt. Disable for providers whose
+    /// tool-call generation is sensitive to long injected context.
+    #[serde(default = "default_true")]
+    pub skills_context: bool,
     #[serde(default = "default_shell_timeout")]
     pub shell_timeout_secs: u64,
 }
@@ -370,6 +374,7 @@ impl Default for ToolsConfig {
             search: true,
             http: true,
             skills_dir: None,
+            skills_context: true,
             shell_timeout_secs: default_shell_timeout(),
         }
     }

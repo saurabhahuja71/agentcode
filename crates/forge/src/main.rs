@@ -183,7 +183,11 @@ async fn main() -> Result<()> {
     let tools = Arc::new(tool_registry);
 
     let mut forge_config = config.clone();
-    let skills_ctx = skill_loader.system_context();
+    let skills_ctx = if config.tools.skills_context {
+        skill_loader.system_context()
+    } else {
+        String::new()
+    };
     if !skills_ctx.is_empty() {
         forge_config.agent.system_prompt =
             format!("{}\n\n{}", forge_config.agent.system_prompt, skills_ctx);
